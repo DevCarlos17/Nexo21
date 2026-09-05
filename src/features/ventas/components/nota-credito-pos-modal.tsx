@@ -336,6 +336,15 @@ export function NotaCreditoPosModal({ isOpen, onClose, sesion }: NotaCreditoPosM
         entryPoint: 'POS',
         sesionCajaActivaId: sesion.id,
         modalidad,
+        // Slice 2 (decouple, Design §origenDinero shape/decoupling): SOLO
+        // EFECTIVO_REAL mueve dinero — `origenDinero` queda OMITIDO para
+        // SALDO_FAVOR/AJUSTE_CXC/COMPENSACION_VENTA (el gate extension de
+        // `validarOrigenDinero` rechaza si se envia igual). El POS-express
+        // esta SIEMPRE restringido a su propia sesion activa (carril
+        // protegido, Design §Decision 4) — nunca ofrece elegir otra cuenta.
+        ...(modalidad === 'EFECTIVO_REAL'
+          ? { origenDinero: { tipo: 'SESION_EFECTIVO' as const, cuentaId: sesion.id } }
+          : {}),
         ...(lineasParcial ? { tipo: 'PARCIAL' as const, lineas: lineasParcial } : {}),
         // PIN B (Slice 5a-2b): `resolverDepositoOverride` retorna `null`
         // salvo que el segundo PIN ya haya autorizado el override Y el

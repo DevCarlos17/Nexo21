@@ -60,13 +60,13 @@ Only the tracker merges to `develop` (opened draft/no-merge from the start). Eac
 
 ## Phase 2: Decouple "regla de oro" (Slice 2)
 
-- [ ] 2.1 RED: rewrite the ~15 describe blocks asserting the old same-session boolean — flip to expect the `origenDinero` shape and dropped same-session rule. Must FAIL until 2.3–2.5.
-- [ ] 2.2 RED: add validation cases (pure, pre-tx): `EFECTIVO_REAL` + non-`SESION_EFECTIVO` → throw; `REFUND_TESORERIA` + `SESION_EFECTIVO` → throw; no-desembolso + `origenDinero` defined → throw; `entryPoint==='POS'` + `SESION_EFECTIVO` + `cuentaId !== sesionCajaActivaId` → throw (Decision 4).
-- [ ] 2.3 GREEN: add `origenDinero: { tipo: 'SESION_EFECTIVO'|'TESORERIA_EFECTIVO'|'BANCO', cuentaId: string }` (optional) to `CrearNotaCreditoParams`.
-- [ ] 2.4 GREEN: implement the pre-tx validation function per design.md lines 45-52 — passes 2.2.
-- [ ] 2.5 GREEN: replace the boolean at `:418-422` with `movesCash` (unchanged), `cuentaDestino = origenDinero`, `sesionValida = origenDinero.tipo !== 'SESION_EFECTIVO' || sesionStatus(cuentaId) === 'ABIERTA'`. Drop the same-session-as-sale requirement — passes 2.1.
-- [ ] 2.6 GREEN: update the `SESION_EFECTIVO` write loop (`:867-885`) to use `sesion_caja_id: origenDinero.cuentaId` (Decision 4 cuadre invariant).
-- [ ] 2.7 Verify green; zero old-boolean references remain. Push `ncr-cuadre-02-decouple`, open PR #2 → base `01-schema`.
+- [x] 2.1 RED: rewrite the describe blocks asserting the old same-session boolean — flip to expect the `origenDinero` shape and dropped same-session rule. Must FAIL until 2.3–2.5.
+- [x] 2.2 RED: add validation cases (pure, pre-tx): `EFECTIVO_REAL` + non-`SESION_EFECTIVO` → throw; `REFUND_TESORERIA` + `SESION_EFECTIVO` → throw; no-desembolso + `origenDinero` defined → throw; `entryPoint==='POS'` + `SESION_EFECTIVO` + `cuentaId !== sesionCajaActivaId` → throw (Decision 4).
+- [x] 2.3 GREEN: add `origenDinero: { tipo: 'SESION_EFECTIVO'|'TESORERIA_EFECTIVO'|'BANCO', cuentaId: string }` (optional) to `CrearNotaCreditoParams`.
+- [x] 2.4 GREEN: implement the pre-tx validation function per design.md lines 45-52 — passes 2.2. (`validarOrigenDinero`, exported, pure.)
+- [x] 2.5 GREEN: replace the boolean at `:418-422` with `movesCash` (= `!esModalidadNoDesembolso(modalidad)`). Drop the same-session-as-sale requirement — passes 2.1. (Deviation: `sesionValida`/`sesionStatus(cuentaId)==='ABIERTA'` NOT implemented here — the closed-session DB read is explicitly Slice 4's task 4.4/4.7 "write-time SELECT"; implementing it now would duplicate that slice. Within the tx, `movesCash` is only ever true for `EFECTIVO_REAL` — `REFUND_TESORERIA` already threw before the tx opened — so no `TESORERIA_EFECTIVO`/`BANCO` write can reach here yet.)
+- [x] 2.6 GREEN: update the `SESION_EFECTIVO` write loop (`:867-885`) to use `sesion_caja_id: origenDinero?.cuentaId ?? null` (Decision 4 cuadre invariant).
+- [x] 2.7 Verify green; zero old-boolean (`aplicaReglaDeOro`) references remain. Committed locally on `feat/ncr-cuadre-02-decouple` (base `feat/ncr-cuadre-01-schema`) — NOT pushed, NOT PR'd (executor scope, orchestrator handles delivery).
 
 ## Phase 3: REFUND_TESORERIA (Slice 3)
 

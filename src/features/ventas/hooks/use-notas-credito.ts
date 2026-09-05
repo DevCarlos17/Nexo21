@@ -130,6 +130,79 @@ export function assertGateAntiFraudeNoDesembolso(
   }
 }
 
+/**
+ * Cuenta especifica de donde sale el dinero cuando la modalidad MUEVE
+ * efectivo/tarjeta (Slice 2, Design §origenDinero shape/decoupling).
+ * Reemplaza el reuso implicito de `sesionCajaActivaId`: `modalidad` decide
+ * la CATEGORIA (cajon de sesion vs. tesoreria/banco), `origenDinero` decide
+ * la CUENTA especifica dentro de esa categoria. `TESORERIA_EFECTIVO`/`BANCO`
+ * validan su shape desde este slice pero el WRITE branch (REFUND_TESORERIA)
+ * recien se implementa en Slice 3.
+ */
+export interface OrigenDinero {
+  tipo: 'SESION_EFECTIVO' | 'TESORERIA_EFECTIVO' | 'BANCO'
+  cuentaId: string
+}
+
+/**
+ * Validacion pura (pre-tx, sin tocar la DB) de la relacion `modalidad` /
+ * `origenDinero` / `entryPoint` (Slice 2, Design §origenDinero
+ * shape/decoupling + §Decision 4 "asimetrica por ruta", obs #2938). Se
+ * evalua junto a `assertGateAntiFraudeNoDesembolso`, ANTES de abrir la
+ * transaccion — una llamada directa que bypasee la UI cae en el mismo
+ * chequeo.
+ *
+ * Reglas (en orden):
+ * 1. `EFECTIVO_REAL` exige `origenDinero.tipo === 'SESION_EFECTIVO'`
+ *    (incluye el caso `origenDinero` indefinido — el dinero real siempre
+ *    necesita una cuenta explicita).
+ * 2. `REFUND_TESORERIA` rechaza `origenDinero.tipo === 'SESION_EFECTIVO'`
+ *    (el cajon de una sesion POS nunca financia un reintegro de tesoreria).
+ * 3. Gate extension: ninguna modalidad SIN desembolso admite `origenDinero`
+ *    definido (mismo espiritu que `assertGateAntiFraudeNoDesembolso`).
+ * 4. Decision 4 (carril protegido): desde `entryPoint==='POS'`, si
+ *    `origenDinero.tipo==='SESION_EFECTIVO'`, `origenDinero.cuentaId` DEBE
+ *    ser la propia `sesionCajaActivaId` del cajero — no puede elegir el
+ *    cajon de otra sesion. Desde `'TRADICIONAL'` esta restriccion NO aplica
+ *    (carril flexible, empresa-wide: cualquier sesion activa).
+ */
+export function validarOrigenDinero(params: {
+  modalidad: LiquidacionModalidad
+  entryPoint: 'POS' | 'TRADICIONAL'
+  sesionCajaActivaId?: string
+  origenDinero?: OrigenDinero
+}): void {
+  const { modalidad, entryPoint, sesionCajaActivaId, origenDinero } = params
+
+  if (modalidad === 'EFECTIVO_REAL' && origenDinero?.tipo !== 'SESION_EFECTIVO') {
+    throw new Error(
+      `origenDinero invalido: la modalidad 'EFECTIVO_REAL' exige origenDinero.tipo === 'SESION_EFECTIVO'.`
+    )
+  }
+
+  if (modalidad === 'REFUND_TESORERIA' && origenDinero?.tipo === 'SESION_EFECTIVO') {
+    throw new Error(
+      `origenDinero invalido: la modalidad 'REFUND_TESORERIA' no admite origenDinero.tipo === 'SESION_EFECTIVO'.`
+    )
+  }
+
+  if (esModalidadNoDesembolso(modalidad) && origenDinero !== undefined) {
+    throw new Error(
+      `origenDinero invalido: la modalidad '${modalidad}' es no-desembolso y no admite origenDinero.`
+    )
+  }
+
+  if (
+    entryPoint === 'POS' &&
+    origenDinero?.tipo === 'SESION_EFECTIVO' &&
+    origenDinero.cuentaId !== sesionCajaActivaId
+  ) {
+    throw new Error(
+      `origenDinero invalido: desde el POS solo se puede usar el efectivo de la propia sesion activa (carril protegido, Design §Decision 4).`
+    )
+  }
+}
+
 /** Linea seleccionada por el llamador para una NC PARCIAL (Slice 4b, Design §Interfaces). */
 export interface LineaNcSeleccionada {
   /** FK a `ventas_det.id` — linea original de la factura a acreditar. */
@@ -155,6 +228,20 @@ export interface CrearNotaCreditoParams {
   sesionCajaActivaId?: string
   /** Modalidad de liquidacion elegida (Slice 3, obligatoria). */
   modalidad: LiquidacionModalidad
+  /**
+   * Origen especifico del dinero cuando la modalidad MUEVE efectivo/tarjeta
+   * (Slice 2, Design §origenDinero shape/decoupling). Obligatorio SOLO
+   * cuando `modalidad` mueve dinero (`EFECTIVO_REAL` | `REFUND_TESORERIA`)
+   * — validado ANTES de abrir la transaccion via `validarOrigenDinero`
+   * (incluye la Decision 4 asimetrica-por-ruta, obs #2938: desde POS,
+   * `SESION_EFECTIVO` DEBE ser la propia `sesionCajaActivaId`; desde
+   * TRADICIONAL puede ser cualquier sesion activa, tesoreria o banco).
+   * Omitido para las 3 modalidades sin desembolso. `TESORERIA_EFECTIVO`/
+   * `BANCO` validan su shape aqui, pero el WRITE branch de
+   * REFUND_TESORERIA recien se implementa en Slice 3 — sigue lanzando "aun
+   * no implementado" sin importar este campo.
+   */
+  origenDinero?: OrigenDinero
   /**
    * Defensa en profundidad / prueba directa del gate anti-fraude: NUNCA se
    * envia en el flujo normal junto a una modalidad no-efectivo. El egreso
@@ -347,6 +434,7 @@ export async function crearNotaCredito(
     entryPoint,
     sesionCajaActivaId,
     modalidad,
+    origenDinero,
     egresoParams,
     tipo,
     lineas,
@@ -357,11 +445,16 @@ export async function crearNotaCredito(
   // transaccion — sin tocar la DB. Ver `assertGateAntiFraudeNoDesembolso`.
   assertGateAntiFraudeNoDesembolso(modalidad, egresoParams)
 
+  // 0c. Validacion de origenDinero (Slice 2, Design §origenDinero
+  // shape/decoupling + §Decision 4): igual que el gate anterior, se evalua
+  // ANTES de abrir la transaccion — sin tocar la DB. Ver `validarOrigenDinero`.
+  validarOrigenDinero({ modalidad, entryPoint, sesionCajaActivaId, origenDinero })
+
   // REFUND_TESORERIA esta validado por el tipo pero se implementa recien en
-  // Slice 6 (Design §5, "no requiere schema nuevo" pero SI logica nueva que
+  // Slice 3 (Design §5, "no requiere schema nuevo" pero SI logica nueva que
   // aun no existe en este slice).
   if (modalidad === 'REFUND_TESORERIA') {
-    throw new Error('REFUND_TESORERIA aun no esta implementado (ver Slice 6)')
+    throw new Error('REFUND_TESORERIA aun no esta implementado (ver Slice 3)')
   }
 
   let ncrId = ''
@@ -408,24 +501,25 @@ export async function crearNotaCredito(
     // saldo remanente").
     const tipoNc: 'TOTAL' | 'PARCIAL' = tipo ?? 'TOTAL'
 
-    // Condicion completa del diseño (Design §Decision 4, obs #2814 — fix
-    // mandatorio de slice 3): entryPoint==='POS' && modalidad==='EFECTIVO_REAL'
-    // && venta.sesion_caja_id===sesionCajaActivaId. Slice 2 dejaba el chequeo
-    // de modalidad afuera (el parametro no existia todavia) — trampa latente
-    // detectada en verify: una NC-POS liquidada como SALDO_FAVOR/AJUSTE_CXC/
-    // COMPENSACION_VENTA hubiera escrito igual el egreso de caja. Ahora la
-    // modalidad es el termino decisivo: solo EFECTIVO_REAL mueve el cajon.
-    const aplicaReglaDeOro =
-      entryPoint === 'POS' &&
-      modalidad === 'EFECTIVO_REAL' &&
-      !!sesionCajaActivaId &&
-      venta.sesion_caja_id === sesionCajaActivaId
-
     // Persistido en `notas_credito.no_desembolso` (Design §5, Spec gate
     // anti-fraude) — TRUE para las 3 modalidades sin efectivo, FALSE para
     // EFECTIVO_REAL/REFUND_TESORERIA (estas SI mueven dinero, aunque por
     // rieles distintos: cajon POS vs tesoreria).
     const noDesembolso = esModalidadNoDesembolso(modalidad)
+
+    // Slice 2 (decouple, Design §origenDinero shape/decoupling): tres
+    // conceptos independientes reemplazan el boolean unico `aplicaReglaDeOro`
+    // que antes acoplaba ambito+modalidad+"misma sesion que la venta" en un
+    // solo flag. `movesCash` decide SI hay egreso real (categoria, viene de
+    // `modalidad`, ya no exige `entryPoint==='POS'`: Decision 4 permite a
+    // TRADICIONAL mover el cajon de cualquier sesion activa). La CUENTA
+    // especifica es `origenDinero` (validado pre-tx por `validarOrigenDinero`
+    // — incluye el carril protegido de POS). El requisito "misma sesion que
+    // la venta" (`venta.sesion_caja_id === sesionCajaActivaId`) se DROPEA
+    // por completo: la divergencia emision!=dinero es un feature intencional
+    // desde TRADICIONAL (Design §Decision 4 "Intentional divergence", obs
+    // #2938) — `venta.sesion_caja_id` ya no participa en esta decision.
+    const movesCash = !noDesembolso
 
     if (venta.status === 'ANULADA') {
       throw new Error('Esta factura ya fue anulada')
@@ -862,7 +956,7 @@ export async function crearNotaCredito(
         [venta_id]
       )
 
-      if (aplicaReglaDeOro && pagosResult.rows) {
+      if (movesCash && pagosResult.rows) {
         for (let i = 0; i < pagosResult.rows.length; i++) {
           const pago = pagosResult.rows.item(i) as {
             id: string
@@ -883,7 +977,13 @@ export async function crearNotaCredito(
               ncrId,
               `NCR-${nroNcr}`,
               `Devolucion NCR ${nroNcr} - Venta ${venta.nro_factura}`,
-              sesionCajaActivaId ?? null,
+              // Slice 2 (Decision 4 cuadre invariant): la cuenta que ve el
+              // egreso es la ELEGIDA por origenDinero, no la del cajero que
+              // emite la NC. `movesCash` solo es true para EFECTIVO_REAL
+              // dentro de esta tx (REFUND_TESORERIA ya lanzo mas arriba,
+              // antes de abrir la transaccion) y `validarOrigenDinero` ya
+              // garantizo `origenDinero.tipo === 'SESION_EFECTIVO'`.
+              origenDinero?.cuentaId ?? null,
               now,
               now,
               usuario_id,
