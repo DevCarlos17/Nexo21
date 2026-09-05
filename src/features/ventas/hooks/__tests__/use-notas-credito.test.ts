@@ -740,6 +740,34 @@ describe('crearNotaCredito — Slice 3 (modalidades de liquidacion + gate anti-f
     expect(ncrInsert!.params[ncrInsert!.params.length - 1]).toBe(1) // no_desembolso = TRUE
   })
 
+  it.each([
+    { entryPoint: 'TRADICIONAL' as const, sesionCajaActivaId: undefined },
+    { entryPoint: 'POS' as const, sesionCajaActivaId: 'sesion-activa-1' },
+  ])(
+    'persiste entry_point=$entryPoint verbatim en el INSERT de notas_credito (Slice 1, migracion 0092)',
+    async ({ entryPoint, sesionCajaActivaId }) => {
+      const calls = mockCrearNcrTx(fixturesModalidad())
+
+      await crearNotaCredito(
+        baseParams({ modalidad: 'SALDO_FAVOR', entryPoint, sesionCajaActivaId })
+      )
+
+      const ncrInsert = calls.find((c) => c.sql.startsWith('INSERT INTO notas_credito ('))
+      expect(ncrInsert).toBeDefined()
+
+      // Localiza la posicion real de la columna `entry_point` en el SQL en
+      // vez de asumir un indice fijo — el assert queda atado al SQL real,
+      // no a un numero magico que se desincroniza si el orden cambia.
+      const columnList = ncrInsert!.sql
+        .slice(ncrInsert!.sql.indexOf('(') + 1, ncrInsert!.sql.indexOf(')'))
+        .split(',')
+        .map((c) => c.trim())
+      const entryPointIndex = columnList.indexOf('entry_point')
+      expect(entryPointIndex).toBeGreaterThanOrEqual(0)
+      expect(ncrInsert!.params[entryPointIndex]).toBe(entryPoint)
+    }
+  )
+
   it('COMPENSACION_VENTA: MISMO comportamiento SAFC que SALDO_FAVOR dentro de esta funcion, y NUNCA invoca crearVenta() internamente', async () => {
     const calls = mockCrearNcrTx(fixturesModalidad())
 

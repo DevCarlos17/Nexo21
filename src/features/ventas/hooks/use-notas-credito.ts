@@ -600,9 +600,14 @@ export async function crearNotaCredito(
       tipoNc === 'TOTAL' ? venta.total_bs : toStorageString(usdToBs(totalUsdNc, venta.tasa))
 
     // 4. INSERT notas_credito (snapshot de la factura + desglose fiscal)
+    // entry_point (migracion 0092, Design §Decision 3): persiste
+    // params.entryPoint verbatim — 'POS' | 'TRADICIONAL'. Colocado entre
+    // sesion_caja_id y liquidacion_modalidad para no desplazar la posicion
+    // de los ultimos 2 parametros (liquidacion_modalidad, no_desembolso),
+    // que otros tests asertan por indice.
     await tx.execute(
-      `INSERT INTO notas_credito (id, nro_ncr, venta_id, cliente_id, tipo, motivo, tasa_historica, total_exento_usd, total_base_usd, total_iva_usd, total_usd, total_bs, afecta_inventario, usuario_id, fecha, empresa_id, created_at, created_by, sesion_caja_id, liquidacion_modalidad, no_desembolso)
-       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+      `INSERT INTO notas_credito (id, nro_ncr, venta_id, cliente_id, tipo, motivo, tasa_historica, total_exento_usd, total_base_usd, total_iva_usd, total_usd, total_bs, afecta_inventario, usuario_id, fecha, empresa_id, created_at, created_by, sesion_caja_id, entry_point, liquidacion_modalidad, no_desembolso)
+       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
       [
         ncrId,
         nroNcr,
@@ -623,6 +628,7 @@ export async function crearNotaCredito(
         now,
         usuario_id,
         sesionCajaIdParaNc,
+        entryPoint,
         modalidad,
         noDesembolso ? 1 : 0,
       ]

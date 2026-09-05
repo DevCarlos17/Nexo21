@@ -773,6 +773,7 @@ const notas_credito = new Table(
     sesion_caja_id: column.text,
     liquidacion_modalidad: column.text,
     no_desembolso: column.integer,
+    entry_point: column.text,
   },
   { indexes: {} }
 )
