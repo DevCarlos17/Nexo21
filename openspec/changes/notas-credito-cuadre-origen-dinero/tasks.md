@@ -79,13 +79,13 @@ Only the tracker merges to `develop` (opened draft/no-merge from the start). Eac
 - [x] 3.16 GREEN: implement Pass 2 (uniform write loop over `resolved`) per design.md lines 89-106 — one loop across all three types (`SESION_EFECTIVO`→`movimientos_metodo_cobro`, `TESORERIA_EFECTIVO`→`mov_caja_fuerte`, `BANCO`→`movimientos_bancarios`) — passes 3.10. **Scope note**: also includes real `saldo_actual` tracking for all 3 account tables (nominally task 3.13/Slice 3b) since Pass 1 already reads `saldo_actual` for the sum-invariant — Pass 2's uniform loop trivially reuses it; see apply-progress deviations for the schema-level correction (no `monto_usd`/`tasa` columns exist on these 3 ledger tables, only `monto` native — obs #2949 overstated this).
 - [x] 3.18 (partial — write-core scope only) Verify green; confirmed `pagos.is_reversed=1` UPDATE stays byte-identical (independent axis, obs #2948) — now unconditional on `movesCash`/pagos existing (decoupling proven by test). Full 3.18 (incl. 3.17's leftover routing) still pending 3b.
 
-### Slice 3b — guards + leftover + tracking (NOT started, next)
+### Slice 3b — guards + leftover + tracking (DONE, `feat/ncr-cuadre-03b-guards-safc`, base `54c61a3` on `feat/ncr-cuadre-03a-write-core`)
 
-- [ ] 3.11 RED: cash-availability guard (obs #2950) — `SESION_EFECTIVO`/`TESORERIA_EFECTIVO` assignment with `monto > saldo_actual` throws (HARD cap, read inside tx before write); `BANCO` assignment allows `saldo_actual` to go negative (soft cap, no throw).
-- [ ] 3.12 RED: leftover routing (design.md lines 108-123) — array covers less than `remanenteALiquidar` + `modalidad !== 'AJUSTE_CXC'` ⇒ SAFC write for `leftoverUsd` when `> epsilon`; `AJUSTE_CXC` keeps forcing an empty array (Rule 2) and uses the full `remanenteALiquidar`.
+- [x] 3.11 RED: cash-availability guard (obs #2950) — `SESION_EFECTIVO`/`TESORERIA_EFECTIVO` assignment with `monto > saldo_actual` throws (HARD cap, read inside tx before write); `BANCO` assignment allows `saldo_actual` to go negative (soft cap, no throw).
+- [x] 3.12 RED: leftover routing (design.md lines 108-123) — array covers less than `remanenteALiquidar` + `modalidad !== 'AJUSTE_CXC'` ⇒ SAFC write for `leftoverUsd` when `> epsilon`; `AJUSTE_CXC` keeps forcing an empty array (Rule 2) and uses the full `remanenteALiquidar`.
 - [x] 3.13 Superseded — real `metodos_cobro.saldo_actual` tracking already implemented in 3a's Pass 2 (see note above). Remaining 3b work: none for this specific task.
-- [ ] 3.17 GREEN: generalize Step B leftover routing per design.md lines 108-123 — passes 3.12.
-- [ ] 3.18 (remainder) Verify green with 3.17 included. New commit on `feat/ncr-cuadre-03a-write-core` (or a new `feat/ncr-cuadre-03b-guards-safc` branch based on it) — NOT pushed yet.
+- [x] 3.17 GREEN: generalize Step B leftover routing per design.md lines 108-123 — passes 3.12.
+- [x] 3.18 (remainder) Verify green with 3.17 included. Commit on new `feat/ncr-cuadre-03b-guards-safc` branch (base `54c61a3`) — NOT pushed yet.
 - [ ] 3.19 Push `ncr-cuadre-02-decouple` and `ncr-cuadre-03a-write-core`/`ncr-cuadre-03b-guards-safc` to `origin`; open/update PR #2 → tracker, PR #3a/3b in chain.
 
 ## Phase 4: Multi-origin picker UI — NEW (Slice 4)

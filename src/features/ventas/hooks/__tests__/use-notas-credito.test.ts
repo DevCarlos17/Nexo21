@@ -1107,6 +1107,244 @@ describe('crearNotaCredito — Slice 3a, mixed-type multi-asignacion (task 3.10,
   })
 })
 
+describe('crearNotaCredito — Slice 3b, guard de disponibilidad de efectivo (task 3.11, obs #2950)', () => {
+  function fixturesDisponibilidad(cuentas: NcrTxFixtures['cuentas']) {
+    return {
+      venta: {
+        id: 'venta-1',
+        cliente_id: 'cliente-1',
+        nro_factura: 'C01-000001',
+        tasa: '40',
+        total_usd: '1000.00',
+        total_bs: '40000.00',
+        // remanenteALiquidar = 1000.00 — deliberadamente holgado para
+        // aislar el guard de disponibilidad (task 3.11) del invariante de
+        // suma de Pass 1 (task 3.9, ya cubierto en su propio describe).
+        saldo_pend_usd: '0.00',
+        tipo: 'CONTADO',
+        status: 'ACTIVA',
+        deposito_id: 'dep-B',
+        sesion_caja_id: 'sesion-activa-1',
+      },
+      ventaDet: [{ producto_id: 'prod-1', cantidad: '3.000', lote_id: null }],
+      productos: { 'prod-1': { tipo: 'P', stock: '20.000', nombre: 'Producto 1' } },
+      inventarioStock: { 'prod-1::dep-B': '10.000' },
+      pagos: [],
+      sesionesCaja: { 'sesion-activa-1': { status: 'ABIERTA' } },
+      cuentas,
+    }
+  }
+
+  it('SESION_EFECTIVO: monto > saldo_actual de la cuenta rechaza (tope DURO), aunque este dentro del remanente de la factura', async () => {
+    const calls = mockCrearNcrTx(
+      fixturesDisponibilidad({
+        'metodo-efectivo-usd': { saldo_actual: '500.00000000', moneda_codigo: 'USD' },
+      })
+    )
+
+    await expect(
+      crearNotaCredito(
+        baseParams({
+          entryPoint: 'POS',
+          sesionCajaActivaId: 'sesion-activa-1',
+          modalidad: 'EFECTIVO_REAL',
+          origenDinero: [{ tipo: 'SESION_EFECTIVO', cuentaId: 'metodo-efectivo-usd', monto: '600.00' }],
+        })
+      )
+    ).rejects.toThrow(/insuficiente/i)
+
+    expect(calls.find((c) => c.sql.startsWith('INSERT INTO movimientos_metodo_cobro'))).toBeUndefined()
+  })
+
+  it('TESORERIA_EFECTIVO: monto > saldo_actual de caja_fuerte rechaza (tope DURO)', async () => {
+    const calls = mockCrearNcrTx(
+      fixturesDisponibilidad({
+        'caja-fuerte-1': { saldo_actual: '500.00000000', moneda_codigo: 'USD' },
+      })
+    )
+
+    await expect(
+      crearNotaCredito(
+        baseParams({
+          entryPoint: 'TRADICIONAL',
+          modalidad: 'EFECTIVO_REAL',
+          origenDinero: [{ tipo: 'TESORERIA_EFECTIVO', cuentaId: 'caja-fuerte-1', monto: '600.00' }],
+        })
+      )
+    ).rejects.toThrow(/insuficiente/i)
+
+    expect(calls.find((c) => c.sql.startsWith('INSERT INTO mov_caja_fuerte'))).toBeUndefined()
+  })
+
+  it('BANCO: monto > saldo_actual de bancos_empresa NO rechaza — sobregiro permitido (tope BLANDO, politica de tesoreria futura)', async () => {
+    const calls = mockCrearNcrTx(
+      fixturesDisponibilidad({
+        'banco-1': { saldo_actual: '500.00000000', moneda_codigo: 'USD' },
+      })
+    )
+
+    await expect(
+      crearNotaCredito(
+        baseParams({
+          entryPoint: 'TRADICIONAL',
+          modalidad: 'EFECTIVO_REAL',
+          origenDinero: [{ tipo: 'BANCO', cuentaId: 'banco-1', monto: '600.00' }],
+        })
+      )
+    ).resolves.toBeDefined()
+
+    const updateBanco = calls.find((c) => c.sql.startsWith('UPDATE bancos_empresa SET saldo_actual'))
+    expect(updateBanco).toBeDefined()
+    expect(updateBanco!.params).toContain('-100.00000000') // 500 - 600, sobregiro permitido
+  })
+})
+
+describe('crearNotaCredito — Slice 3b, leftover→SAFC (task 3.12, Design §Leftover routing)', () => {
+  function fixturesLeftover(
+    cuentas: NcrTxFixtures['cuentas'],
+    overrides: Partial<NcrTxFixtures['venta']> = {}
+  ) {
+    return {
+      venta: {
+        id: 'venta-1',
+        cliente_id: 'cliente-1',
+        nro_factura: 'C01-000001',
+        tasa: '40',
+        total_usd: '100.00',
+        total_bs: '4000.00',
+        saldo_pend_usd: '0.00', // remanenteALiquidar = 100.00
+        tipo: 'CONTADO',
+        status: 'ACTIVA',
+        deposito_id: 'dep-B',
+        sesion_caja_id: 'sesion-activa-1',
+        ...overrides,
+      },
+      ventaDet: [{ producto_id: 'prod-1', cantidad: '3.000', lote_id: null }],
+      productos: { 'prod-1': { tipo: 'P', stock: '20.000', nombre: 'Producto 1' } },
+      inventarioStock: { 'prod-1::dep-B': '10.000' },
+      pagos: [],
+      sesionesCaja: { 'sesion-activa-1': { status: 'ABIERTA' } },
+      clienteSaldoActual: '0.00',
+      cuentas,
+    }
+  }
+
+  it('array cubre MENOS que el remanente (40.00 de 100.00) + modalidad EFECTIVO_REAL: escribe SAFC por el sobrante (60.00), trazable al mismo ncrId, UNA sola fila', async () => {
+    const calls = mockCrearNcrTx(
+      fixturesLeftover({ 'metodo-efectivo-usd': { saldo_actual: '500.00000000', moneda_codigo: 'USD' } })
+    )
+
+    await crearNotaCredito(
+      baseParams({
+        entryPoint: 'POS',
+        sesionCajaActivaId: 'sesion-activa-1',
+        modalidad: 'EFECTIVO_REAL',
+        origenDinero: [{ tipo: 'SESION_EFECTIVO', cuentaId: 'metodo-efectivo-usd', monto: '40.00' }],
+      })
+    )
+
+    const safcInserts = calls.filter(
+      (c) => c.sql.startsWith('INSERT INTO movimientos_cuenta') && c.sql.includes("'SAFC'")
+    )
+    expect(safcInserts).toHaveLength(1) // NO double-credit
+    expect(safcInserts[0].params).toContain('60.00000000') // 100 remanente - 40 cash = 60 leftover
+
+    const ncrInsert = calls.find((c) => c.sql.startsWith('INSERT INTO notas_credito'))
+    const ncrId = ncrInsert!.params[0] as string
+    expect(safcInserts[0].params).toContain(ncrId)
+
+    // El egreso de efectivo SI se escribio (los 40.00 en cash), independiente del SAFC (60.00 en credito)
+    const egresoInsert = calls.find(
+      (c) => c.sql.startsWith('INSERT INTO movimientos_metodo_cobro') && c.sql.includes("'NCR'")
+    )
+    expect(egresoInsert).toBeDefined()
+    expect(egresoInsert!.params).toContain('40.00000000')
+  })
+
+  it('array cubre el remanente COMPLETO (100.00 de 100.00): NO escribe SAFC (nada quedo como credito)', async () => {
+    const calls = mockCrearNcrTx(
+      fixturesLeftover({ 'metodo-efectivo-usd': { saldo_actual: '500.00000000', moneda_codigo: 'USD' } })
+    )
+
+    await crearNotaCredito(
+      baseParams({
+        entryPoint: 'POS',
+        sesionCajaActivaId: 'sesion-activa-1',
+        modalidad: 'EFECTIVO_REAL',
+        origenDinero: [{ tipo: 'SESION_EFECTIVO', cuentaId: 'metodo-efectivo-usd', monto: '100.00' }],
+      })
+    )
+
+    const safcInsert = calls.find(
+      (c) => c.sql.startsWith('INSERT INTO movimientos_cuenta') && c.sql.includes("'SAFC'")
+    )
+    expect(safcInsert).toBeUndefined()
+  })
+
+  it('AJUSTE_CXC (no-desembolso, array vacio forzado): usa la RAMA AJUSTE con el remanente completo, NUNCA la ruta SAFC (sin doble-escritura entre ramas)', async () => {
+    const calls = mockCrearNcrTx(fixturesLeftover({}))
+
+    await crearNotaCredito(baseParams({ entryPoint: 'TRADICIONAL', modalidad: 'AJUSTE_CXC' }))
+
+    const ajusteInsert = calls.find(
+      (c) => c.sql.startsWith('INSERT INTO movimientos_cuenta') && c.sql.includes("'NCR'")
+    )
+    expect(ajusteInsert).toBeDefined()
+    expect(ajusteInsert!.params).toContain('100.00000000')
+
+    const safcInsert = calls.find(
+      (c) => c.sql.startsWith('INSERT INTO movimientos_cuenta') && c.sql.includes("'SAFC'")
+    )
+    expect(safcInsert).toBeUndefined()
+  })
+
+  it('epsilon boundary: leftover exactamente en 0.005 (NO mayor a EPSILON) NO escribe SAFC — el polvo de redondeo no genera credito', async () => {
+    const calls = mockCrearNcrTx(
+      fixturesLeftover(
+        { 'metodo-efectivo-usd': { saldo_actual: '500.00000000', moneda_codigo: 'USD' } },
+        { total_usd: '100.005', saldo_pend_usd: '0.00' } // remanenteALiquidar = 100.005
+      )
+    )
+
+    await crearNotaCredito(
+      baseParams({
+        entryPoint: 'POS',
+        sesionCajaActivaId: 'sesion-activa-1',
+        modalidad: 'EFECTIVO_REAL',
+        origenDinero: [{ tipo: 'SESION_EFECTIVO', cuentaId: 'metodo-efectivo-usd', monto: '100.00' }],
+      })
+    )
+
+    const safcInsert = calls.find(
+      (c) => c.sql.startsWith('INSERT INTO movimientos_cuenta') && c.sql.includes("'SAFC'")
+    )
+    expect(safcInsert).toBeUndefined()
+  })
+
+  it('epsilon boundary: leftover apenas por ENCIMA de 0.005 (0.01) SI escribe SAFC', async () => {
+    const calls = mockCrearNcrTx(
+      fixturesLeftover(
+        { 'metodo-efectivo-usd': { saldo_actual: '500.00000000', moneda_codigo: 'USD' } },
+        { total_usd: '100.01', saldo_pend_usd: '0.00' } // remanenteALiquidar = 100.01
+      )
+    )
+
+    await crearNotaCredito(
+      baseParams({
+        entryPoint: 'POS',
+        sesionCajaActivaId: 'sesion-activa-1',
+        modalidad: 'EFECTIVO_REAL',
+        origenDinero: [{ tipo: 'SESION_EFECTIVO', cuentaId: 'metodo-efectivo-usd', monto: '100.00' }],
+      })
+    )
+
+    const safcInsert = calls.find(
+      (c) => c.sql.startsWith('INSERT INTO movimientos_cuenta') && c.sql.includes("'SAFC'")
+    )
+    expect(safcInsert).toBeDefined()
+  })
+})
+
 describe('crearNotaCredito — Slice 3a, ausencia del modelo FIFO viejo (task 3.8)', () => {
   it('el modulo NO referencia capearEgresosPorRemanente/PagoParaReversaEfectivo/EgresoReversaCapeado (modelo FIFO-sobre-pagos removido por completo — nunca existio en esta rama, confirmado por lectura de codigo)', async () => {
     const fs = await import('node:fs/promises')

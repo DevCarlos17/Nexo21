@@ -946,6 +946,17 @@ export async function crearNotaCredito(
     // conocer `montoAplicadoAPendiente`.
     const remanenteALiquidar = Decimal.max(new Decimal(0), totalUsdNc.minus(montoAplicadoAPendiente))
 
+    // Slice 3b (tasks 3.11/3.12, Design §Leftover routing): `montoADevolverUsd`
+    // y `EPSILON` hoisted ANTES del bloque 6c (en vez de declarados dentro)
+    // para que Step B (paso 9, mas abajo) pueda leer cuanto de
+    // `remanenteALiquidar` fue REALMENTE cubierto en efectivo/banco y
+    // calcular `leftoverUsd`. Para toda combinacion que NO entra al bloque
+    // 6c (modalidad sin desembolso, o tipoNc==='PARCIAL') queda en 0 —
+    // preserva el comportamiento pre-3b donde el leftover ERA el remanente
+    // completo (SALDO_FAVOR/COMPENSACION_VENTA/AJUSTE_CXC).
+    let montoADevolverUsd = new Decimal(0)
+    const EPSILON = new Decimal('0.005') // obs #2945/#2948/#2949 convention
+
     if (montoAplicadoAPendiente.gt('0.01')) {
       const clienteResult = await tx.execute('SELECT saldo_actual FROM clientes WHERE id = ?', [
         venta.cliente_id,
@@ -1046,7 +1057,6 @@ export async function crearNotaCredito(
         BANCO: 'bancos_empresa',
       }
 
-      let montoADevolverUsd = new Decimal(0)
       const resueltas: Array<{
         tipo: OrigenDinero['tipo']
         cuentaId: string
@@ -1069,6 +1079,24 @@ export async function crearNotaCredito(
         }
         const cuentaRow = cuentaResult.rows.item(0) as { saldo_actual: string; moneda_codigo: string }
         const montoNativo = new Decimal(asignacion.monto)
+        const saldoActualCuenta = new Decimal(cuentaRow.saldo_actual)
+
+        // Slice 3b (task 3.11, obs #2950): tope DURO de disponibilidad para
+        // efectivo (SESION_EFECTIVO/TESORERIA_EFECTIVO) — invariante FISICA
+        // (un cajon/caja fuerte no puede quedar en negativo), se valida SIEMPRE
+        // en el punto de escritura, leyendo `saldo_actual` DENTRO de esta misma
+        // tx (ya leido arriba, no se repite la lectura). BANCO queda
+        // deliberadamente SIN tope aqui (sobregiro permitido — politica de
+        // tesoreria futura, obs #2950/#2945 regla 3).
+        if (
+          (asignacion.tipo === 'SESION_EFECTIVO' || asignacion.tipo === 'TESORERIA_EFECTIVO') &&
+          montoNativo.gt(saldoActualCuenta)
+        ) {
+          throw new Error(
+            `Efectivo insuficiente en la cuenta '${asignacion.cuentaId}' (${asignacion.tipo}): disponible ${saldoActualCuenta.toFixed(2)}, solicitado ${montoNativo.toFixed(2)}`
+          )
+        }
+
         const montoUsd =
           cuentaRow.moneda_codigo === 'VES' ? bsToUsd(montoNativo, venta.tasa) : montoNativo
 
@@ -1077,11 +1105,10 @@ export async function crearNotaCredito(
           tipo: asignacion.tipo,
           cuentaId: asignacion.cuentaId,
           monto: montoNativo,
-          saldoActual: new Decimal(cuentaRow.saldo_actual),
+          saldoActual: saldoActualCuenta,
         })
       }
 
-      const EPSILON = new Decimal('0.005')
       if (montoADevolverUsd.gt(remanenteALiquidar.plus(EPSILON))) {
         throw new Error(
           `El monto a devolver (${montoADevolverUsd.toFixed(2)} USD) excede el remanente disponible de la factura (${remanenteALiquidar.toFixed(2)} USD)`
@@ -1196,73 +1223,25 @@ export async function crearNotaCredito(
       )
     }
 
-    // 7. Step B (Design §3 paso 9): liquidar el REMANENTE ya cobrado — el
-    //     monto de ESTA NC (`totalUsdNc`) menos lo que Step A ya aplico a
-    //     la deuda pendiente (`montoAplicadoAPendiente`) — segun la
-    //     modalidad elegida. Para TOTAL es identico a la formula pre-4b
-    //     (montoAplicadoAPendiente === saldoPendVenta); para PARCIAL queda
-    //     escopeado a las lineas seleccionadas. EFECTIVO_REAL no entra a
-    //     este switch: su liquidacion ES el egreso condicional del two-pass
-    //     write core (paso 6c), no un movimiento de cuenta adicional.
-    //     `remanenteALiquidar` ya fue hoisted arriba (Slice 3a, antes de
-    //     paso 6c) — no se redeclara aqui.
-    if (remanenteALiquidar.gt('0.01')) {
-      if (modalidad === 'SALDO_FAVOR' || modalidad === 'COMPENSACION_VENTA') {
-        // SALDO_FAVOR y COMPENSACION_VENTA dejan el MISMO SAFC trazable
-        // (Design §3: "COMPENSACION_VENTA compone con una venta nueva
-        // simultanea... dos transacciones secuenciales"). La diferencia
-        // vive en el LLAMADOR (Slice 5 UI hara un crearVenta() separado que
-        // consume este SAFC via `safEntry`) — crearNotaCredito nunca invoca
-        // crearVenta() internamente (tradeoff aceptado, obs task 3.1).
-        //
-        // Reusa el PATRON de `registrarSafExcedente`
-        // (src/features/cxc/hooks/use-cxc.ts:1934) pero INLINE dentro de
-        // esta misma transaccion — NO se invoca esa funcion standalone
-        // porque abre su propia `db.writeTransaction` y anidar
-        // transacciones rompe la atomicidad unica exigida por el diseño
-        // (Design §Technical Approach: "un unico db.writeTransaction()").
-        // `doc_origen_id`/`doc_origen_tipo` dejan el SAFC trazable hasta
-        // `nota_credito_id` (Spec notas-credito-liquidacion, scenario
-        // "SAFC generado referencia el nota_credito_id de origen").
-        const clienteSafcResult = await tx.execute(
-          'SELECT saldo_actual FROM clientes WHERE id = ?',
-          [venta.cliente_id]
-        )
-        if (!clienteSafcResult.rows || clienteSafcResult.rows.length === 0) {
-          throw new Error('Cliente no encontrado')
-        }
-        const saldoActualSafc = new Decimal(
-          (clienteSafcResult.rows.item(0) as { saldo_actual: string }).saldo_actual || '0'
-        )
-        const saldoNuevoSafc = saldoActualSafc.minus(remanenteALiquidar)
-
-        await tx.execute(
-          `INSERT INTO movimientos_cuenta (id, cliente_id, tipo, referencia, monto, saldo_anterior, saldo_nuevo, observacion, venta_id, fecha, empresa_id, created_at, created_by, doc_origen_id, doc_origen_tipo)
-           VALUES (?, ?, 'SAFC', ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
-          [
-            uuidv4(),
-            venta.cliente_id,
-            `SAF-NCR-${nroNcr}`,
-            toStorageString(remanenteALiquidar),
-            toStorageString(saldoActualSafc),
-            toStorageString(saldoNuevoSafc),
-            `Saldo a favor generado por ${nroNcr} (${modalidad}) - Factura ${venta.nro_factura}`,
-            venta_id,
-            now,
-            empresa_id,
-            now,
-            usuario_id,
-            ncrId,
-            'NOTA_CREDITO',
-          ]
-        )
-
-        await tx.execute('UPDATE clientes SET saldo_actual = ?, updated_at = ? WHERE id = ?', [
-          toStorageString(saldoNuevoSafc),
-          now,
-          venta.cliente_id,
-        ])
-      } else if (modalidad === 'AJUSTE_CXC') {
+    // 7. Step B (Design §3 paso 9, generalizado por Slice 3b tasks 3.12/3.17,
+    //     Design §"Leftover routing — combination is the DEFAULT"):
+    //     liquidar lo que NO quedo cubierto por el two-pass write core de
+    //     arriba (paso 6c). `AJUSTE_CXC` es la UNICA modalidad que fuerza
+    //     `origenDinero` vacio (Rule 2) — su rama usa el `remanenteALiquidar`
+    //     completo, sin cambios (nunca crea credito, solo cancela deuda
+    //     existente). Para CUALQUIER OTRA modalidad (incluidas
+    //     SALDO_FAVOR/COMPENSACION_VENTA — que nunca entran al bloque 6c,
+    //     `montoADevolverUsd` queda en 0 — Y EFECTIVO_REAL/REFUND_TESORERIA
+    //     con cobertura PARCIAL en efectivo/banco) el SOBRANTE
+    //     (`leftoverUsd = remanenteALiquidar - montoADevolverUsd`) se
+    //     enruta como credito a favor (SAFC) — esta ES la "combinacion"
+    //     que obs #2948 declara valida (parte efectivo + parte credito).
+    //     `remanenteALiquidar`/`montoADevolverUsd`/`EPSILON` ya fueron
+    //     hoisted arriba (Slice 3a/3b, antes de paso 6c) — no se
+    //     redeclaran aqui. Estructura if/else-if: NUNCA ambas ramas
+    //     escriben para la misma NC (sin doble-credito).
+    if (modalidad === 'AJUSTE_CXC') {
+      if (remanenteALiquidar.gt('0.01')) {
         // Reusa el MISMO patron de reduccion de saldo que Step A (paso 5,
         // lineas ~440-478) — nunca crea credito, solo cancela deuda
         // EXISTENTE del cliente (tope en 0). Task 3.4.
@@ -1298,6 +1277,69 @@ export async function crearNotaCredito(
 
         await tx.execute('UPDATE clientes SET saldo_actual = ?, updated_at = ? WHERE id = ?', [
           toStorageString(saldoNuevoAjuste),
+          now,
+          venta.cliente_id,
+        ])
+      }
+    } else {
+      const leftoverUsd = remanenteALiquidar.minus(montoADevolverUsd)
+      if (leftoverUsd.gt(EPSILON)) {
+        // SALDO_FAVOR y COMPENSACION_VENTA dejan el MISMO SAFC trazable
+        // (Design §3: "COMPENSACION_VENTA compone con una venta nueva
+        // simultanea... dos transacciones secuenciales"). La diferencia
+        // vive en el LLAMADOR (Slice 5 UI hara un crearVenta() separado que
+        // consume este SAFC via `safEntry`) — crearNotaCredito nunca invoca
+        // crearVenta() internamente (tradeoff aceptado, obs task 3.1).
+        // Slice 3b generaliza esta MISMA rama para EFECTIVO_REAL/
+        // REFUND_TESORERIA cuando el array no cubrio el remanente completo
+        // (Design §Leftover routing) — `leftoverUsd` reemplaza a
+        // `remanenteALiquidar` como monto escrito; para las 2 modalidades
+        // sin desembolso son identicos (`montoADevolverUsd` siempre 0).
+        //
+        // Reusa el PATRON de `registrarSafExcedente`
+        // (src/features/cxc/hooks/use-cxc.ts:1934) pero INLINE dentro de
+        // esta misma transaccion — NO se invoca esa funcion standalone
+        // porque abre su propia `db.writeTransaction` y anidar
+        // transacciones rompe la atomicidad unica exigida por el diseño
+        // (Design §Technical Approach: "un unico db.writeTransaction()").
+        // `doc_origen_id`/`doc_origen_tipo` dejan el SAFC trazable hasta
+        // `nota_credito_id` (Spec notas-credito-liquidacion, scenario
+        // "SAFC generado referencia el nota_credito_id de origen").
+        const clienteSafcResult = await tx.execute(
+          'SELECT saldo_actual FROM clientes WHERE id = ?',
+          [venta.cliente_id]
+        )
+        if (!clienteSafcResult.rows || clienteSafcResult.rows.length === 0) {
+          throw new Error('Cliente no encontrado')
+        }
+        const saldoActualSafc = new Decimal(
+          (clienteSafcResult.rows.item(0) as { saldo_actual: string }).saldo_actual || '0'
+        )
+        const saldoNuevoSafc = saldoActualSafc.minus(leftoverUsd)
+
+        await tx.execute(
+          `INSERT INTO movimientos_cuenta (id, cliente_id, tipo, referencia, monto, saldo_anterior, saldo_nuevo, observacion, venta_id, fecha, empresa_id, created_at, created_by, doc_origen_id, doc_origen_tipo)
+           VALUES (?, ?, 'SAFC', ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+          [
+            uuidv4(),
+            venta.cliente_id,
+            `SAF-NCR-${nroNcr}`,
+            toStorageString(leftoverUsd),
+            toStorageString(saldoActualSafc),
+            toStorageString(saldoNuevoSafc),
+            `Saldo a favor generado por ${nroNcr} (${modalidad}) - Factura ${venta.nro_factura}`,
+            venta_id,
+            now,
+            empresa_id,
+            now,
+            usuario_id,
+            ncrId,
+            'NOTA_CREDITO',
+          ]
+        )
+
+        await tx.execute('UPDATE clientes SET saldo_actual = ?, updated_at = ? WHERE id = ?', [
+          toStorageString(saldoNuevoSafc),
           now,
           venta.cliente_id,
         ])
