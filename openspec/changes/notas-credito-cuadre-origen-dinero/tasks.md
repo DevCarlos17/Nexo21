@@ -69,18 +69,24 @@ Only the tracker merges to `develop` (opened draft/no-merge from the start). Eac
 
 ## Phase 3: Multi-source write — REWORK (Slice 3, two-pass over the array)
 
-- [ ] 3.8 RED: assert `capearEgresosPorRemanente`/`PagoParaReversaEfectivo`/`EgresoReversaCapeado` are gone (compile-time absence + no references) — proves the FIFO-over-`pagos` model is fully removed, not just unused.
-- [ ] 3.9 RED: Pass-1 sum-invariant — `Σ(assignment→USD via venta.tasa) ≤ remanenteALiquidar + epsilon(0.005)` accepted; over-limit rejected; unknown/cross-empresa `cuentaId` rejected (design.md lines 69–87).
-- [ ] 3.10 RED: multi-assignment mixed-type integration test (owner's canonical example: Bs500 `SESION_EFECTIVO` + Bs500 `BANCO` in ONE NC) — writes to BOTH `movimientos_metodo_cobro` and `movimientos_bancarios`; closed-session guard evaluated ONCE for the resolved session, not per-assignment.
+### Slice 3a — write core (DONE, fresh on `feat/ncr-cuadre-03a-write-core`, base `21aa4e5` on `feat/ncr-cuadre-02-decouple`)
+
+- [x] 3.8 RED: assert `capearEgresosPorRemanente`/`PagoParaReversaEfectivo`/`EgresoReversaCapeado` are gone (compile-time absence + no references) — proves the FIFO-over-`pagos` model is fully removed, not just unused. **Note**: these identifiers never existed on the `feat/ncr-cuadre-02-decouple` chain (only on the abandoned `feat/ncr-cuadre-03-refund-tesoreria` branch) — the old paso 6c write branch used a simpler per-pago loop instead, which this slice replaced with the two-pass core. Absence test added anyway per this task.
+- [x] 3.9 RED: Pass-1 sum-invariant — `Σ(assignment→USD via venta.tasa) ≤ remanenteALiquidar + epsilon(0.005)` accepted; over-limit rejected; unknown/cross-empresa `cuentaId` rejected (design.md lines 69-87).
+- [x] 3.10 RED: multi-assignment mixed-type integration test (owner's canonical example: Bs500 `SESION_EFECTIVO` + Bs500 `BANCO` in ONE NC) — writes to BOTH `movimientos_metodo_cobro` and `movimientos_bancarios`; closed-session guard evaluated ONCE for the resolved session, not per-assignment.
+- [x] 3.14 GREEN: DELETE the old paso 6c per-pago write loop (the `SELECT id, metodo_cobro_id, monto FROM pagos` that fed it, and the "first SESION_EFECTIVO assignment" placeholder) — passes 3.8.
+- [x] 3.15 GREEN: implement Pass 1 (resolve + accumulate, no writes) per design.md lines 69-87 — passes 3.9. `remanenteALiquidar` hoisted from Step B to right after Step A so Pass 1 can consume it as input.
+- [x] 3.16 GREEN: implement Pass 2 (uniform write loop over `resolved`) per design.md lines 89-106 — one loop across all three types (`SESION_EFECTIVO`→`movimientos_metodo_cobro`, `TESORERIA_EFECTIVO`→`mov_caja_fuerte`, `BANCO`→`movimientos_bancarios`) — passes 3.10. **Scope note**: also includes real `saldo_actual` tracking for all 3 account tables (nominally task 3.13/Slice 3b) since Pass 1 already reads `saldo_actual` for the sum-invariant — Pass 2's uniform loop trivially reuses it; see apply-progress deviations for the schema-level correction (no `monto_usd`/`tasa` columns exist on these 3 ledger tables, only `monto` native — obs #2949 overstated this).
+- [x] 3.18 (partial — write-core scope only) Verify green; confirmed `pagos.is_reversed=1` UPDATE stays byte-identical (independent axis, obs #2948) — now unconditional on `movesCash`/pagos existing (decoupling proven by test). Full 3.18 (incl. 3.17's leftover routing) still pending 3b.
+
+### Slice 3b — guards + leftover + tracking (NOT started, next)
+
 - [ ] 3.11 RED: cash-availability guard (obs #2950) — `SESION_EFECTIVO`/`TESORERIA_EFECTIVO` assignment with `monto > saldo_actual` throws (HARD cap, read inside tx before write); `BANCO` assignment allows `saldo_actual` to go negative (soft cap, no throw).
-- [ ] 3.12 RED: leftover routing (design.md lines 108–123) — array covers less than `remanenteALiquidar` + `modalidad !== 'AJUSTE_CXC'` ⇒ SAFC write for `leftoverUsd` when `> epsilon`; `AJUSTE_CXC` keeps forcing an empty array (Rule 2) and uses the full `remanenteALiquidar`.
-- [ ] 3.13 RED: `metodos_cobro.saldo_actual` gets REAL tracking for `SESION_EFECTIVO` egresos (replaces the old hardcoded `saldo_anterior=0, saldo_nuevo=0` placeholder) — `.toFixed(4)` on `saldo_actual` (Decision 1 extension), `toStorageString` on `movimientos_metodo_cobro` row fields.
-- [ ] 3.14 GREEN: DELETE `capearEgresosPorRemanente`, `PagoParaReversaEfectivo`, `EgresoReversaCapeado`, and the now-dead `SELECT ... FROM pagos` that fed it — passes 3.8.
-- [ ] 3.15 GREEN: implement Pass 1 (resolve + accumulate, no writes) per design.md lines 69–87 — passes 3.9/3.11.
-- [ ] 3.16 GREEN: implement Pass 2 (uniform write loop over `resolved`) per design.md lines 89–106 — replaces the old `if(SESION_EFECTIVO)/else if(TESORERIA|BANCO)` branch with one loop across all three types — passes 3.10/3.13.
-- [ ] 3.17 GREEN: generalize Step B leftover routing per design.md lines 108–123 — passes 3.12.
-- [ ] 3.18 Verify green; confirm `pagos.is_reversed=1` UPDATE stays byte-identical (independent axis, obs #2948). New commit on `feat/ncr-cuadre-03-refund-tesoreria` (base `9c6f576`) — same precedent as 3.7. NOT pushed yet.
-- [ ] 3.19 Push `ncr-cuadre-02-decouple` and `ncr-cuadre-03-refund-tesoreria` (updated) to `origin`; open/update PR #2 → tracker, PR #3 → PR #2. If the risk flag above is accepted, split 3.14–3.18 into 3a (3.14–3.16) / 3b (3.17–3.18) branches/PRs instead of one.
+- [ ] 3.12 RED: leftover routing (design.md lines 108-123) — array covers less than `remanenteALiquidar` + `modalidad !== 'AJUSTE_CXC'` ⇒ SAFC write for `leftoverUsd` when `> epsilon`; `AJUSTE_CXC` keeps forcing an empty array (Rule 2) and uses the full `remanenteALiquidar`.
+- [x] 3.13 Superseded — real `metodos_cobro.saldo_actual` tracking already implemented in 3a's Pass 2 (see note above). Remaining 3b work: none for this specific task.
+- [ ] 3.17 GREEN: generalize Step B leftover routing per design.md lines 108-123 — passes 3.12.
+- [ ] 3.18 (remainder) Verify green with 3.17 included. New commit on `feat/ncr-cuadre-03a-write-core` (or a new `feat/ncr-cuadre-03b-guards-safc` branch based on it) — NOT pushed yet.
+- [ ] 3.19 Push `ncr-cuadre-02-decouple` and `ncr-cuadre-03a-write-core`/`ncr-cuadre-03b-guards-safc` to `origin`; open/update PR #2 → tracker, PR #3a/3b in chain.
 
 ## Phase 4: Multi-origin picker UI — NEW (Slice 4)
 

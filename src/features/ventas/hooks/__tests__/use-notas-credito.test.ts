@@ -114,6 +114,21 @@ interface NcrTxFixtures {
   yaAcreditadoPorLinea?: Record<string, string>
   /** Slice 5a-2a: si `false`, la validacion del override de deposito falla (inactivo/otra empresa). Default `true` (valido) cuando no se especifica. */
   overrideDepositoValido?: boolean
+  /**
+   * Slice 3a: estado de las sesiones de caja consultadas por el guard de
+   * sesion cerrada del two-pass write core (Design §Decision 4/5 "Guard"),
+   * keyed por session id. Una sesion ausente de este mapa simula "no
+   * encontrada / no pertenece a la empresa".
+   */
+  sesionesCaja?: Record<string, { status: string }>
+  /**
+   * Slice 3a: `saldo_actual` + moneda (`codigo_iso`) de las cuentas
+   * reales resueltas por el two-pass write core (Pass 1) — cubre las 3
+   * tablas (`metodos_cobro`, `caja_fuerte`, `bancos_empresa`), keyed por
+   * `cuentaId`. Una cuenta ausente de este mapa simula "no existe / no
+   * pertenece a la empresa" (rechazo de Pass 1).
+   */
+  cuentas?: Record<string, { saldo_actual: string; moneda_codigo: string }>
 }
 
 /**
@@ -222,7 +237,37 @@ function mockCrearNcrTx(opts: NcrTxFixtures) {
         if (sql.startsWith('UPDATE pagos SET is_reversed')) {
           return { rows: { length: 0, item: () => undefined } }
         }
+        // Slice 3a: guard de sesion cerrada (Design §Decision 4/5), evaluado
+        // UNA vez para toda la NC — resuelto ANTES del loop de Pass 1.
+        if (sql.startsWith('SELECT status FROM sesiones_caja WHERE id = ? AND empresa_id = ?')) {
+          const sesionId = params[0] as string
+          const row = opts.sesionesCaja?.[sesionId]
+          return row ? { rows: { length: 1, item: () => row } } : { rows: { length: 0, item: () => undefined } }
+        }
+        // Slice 3a: Pass 1 — resolucion de cuenta real (metodos_cobro |
+        // caja_fuerte | bancos_empresa) + su moneda fija, por tipo.
+        if (
+          sql.includes('FROM metodos_cobro t JOIN monedas') ||
+          sql.includes('FROM caja_fuerte t JOIN monedas') ||
+          sql.includes('FROM bancos_empresa t JOIN monedas')
+        ) {
+          const cuentaId = params[0] as string
+          const row = opts.cuentas?.[cuentaId]
+          return row ? { rows: { length: 1, item: () => row } } : { rows: { length: 0, item: () => undefined } }
+        }
         if (sql.startsWith('INSERT INTO movimientos_metodo_cobro')) {
+          return { rows: { length: 0, item: () => undefined } }
+        }
+        // Slice 3a: Pass 2 — egresos de tesoreria/banco + actualizacion de
+        // saldo_actual real en las 3 tablas de cuenta.
+        if (sql.startsWith('INSERT INTO mov_caja_fuerte') || sql.startsWith('INSERT INTO movimientos_bancarios')) {
+          return { rows: { length: 0, item: () => undefined } }
+        }
+        if (
+          sql.startsWith('UPDATE metodos_cobro SET saldo_actual') ||
+          sql.startsWith('UPDATE caja_fuerte SET saldo_actual') ||
+          sql.startsWith('UPDATE bancos_empresa SET saldo_actual')
+        ) {
           return { rows: { length: 0, item: () => undefined } }
         }
         if (sql.startsWith('SELECT saldo_actual FROM clientes WHERE id = ?')) {
@@ -641,8 +686,11 @@ describe('validarOrigenDinero — funcion pura, contrato ARRAY multi-origen (Sli
   })
 })
 
-describe('crearNotaCredito — Slice 2 REWORK (origenDinero array, Design §Decision 5): desacopla la CUENTA del ambito de emision, drop same-session-as-sale', () => {
-  function fixturesConPagos(overrides: Partial<NcrTxFixtures['venta']> = {}, pagos?: NcrTxFixtures['pagos']) {
+describe('crearNotaCredito — Slice 3a (two-pass write core sobre origenDinero[], Design §Decision 5 Pass 1/Pass 2)', () => {
+  function fixturesConCuentas(
+    overrides: Partial<NcrTxFixtures['venta']> = {},
+    extra: Partial<NcrTxFixtures> = {}
+  ) {
     return {
       venta: {
         id: 'venta-1',
@@ -661,29 +709,28 @@ describe('crearNotaCredito — Slice 2 REWORK (origenDinero array, Design §Deci
       ventaDet: [{ producto_id: 'prod-1', cantidad: '3.000', lote_id: null }],
       productos: { 'prod-1': { tipo: 'P', stock: '20.000', nombre: 'Producto 1' } },
       inventarioStock: { 'prod-1::dep-B': '10.000' },
-      pagos,
+      pagos: [],
+      sesionesCaja: { 'sesion-activa-1': { status: 'ABIERTA' } },
+      cuentas: {
+        'metodo-efectivo-usd': { saldo_actual: '500.00000000', moneda_codigo: 'USD' },
+      },
+      ...extra,
     }
   }
 
-  // NOTA (Slice 2 REWORK, deviation report): el WRITE branch de la Regla de
-  // Oro (paso 6c) NO se toca en este slice — sigue iterando `pagos`
-  // originales y escribiendo un egreso por cada uno (comportamiento Slice
-  // 1/2 sin cambios). El array `origenDinero` solo aporta, en este slice,
-  // la CUENTA (`sesion_caja_id`) que se estampa en cada egreso — resuelta
-  // como la PRIMERA asignacion `SESION_EFECTIVO` del array (`cuentaId`,
-  // hoy todavia una sesion, NO un metodo_cobro.id real — esa reinterpretacion
-  // de Decision 5 recien se materializa en el two-pass write de Slice 3a,
-  // que reemplaza por completo este loop). Un array con una sola asignacion
-  // `SESION_EFECTIVO` es, por tanto, el equivalente exacto del objeto unico
-  // pre-rework para todo lo que este slice ejercita.
-  const origenSesionActiva: OrigenDinero = { tipo: 'SESION_EFECTIVO', cuentaId: 'sesion-activa-1', monto: '30.00' }
+  // NOTA (Slice 3a): reemplaza por completo el loop viejo de Slice 1/2
+  // (paso 6c, iteraba `pagos` originales 1:1). El write core ahora itera
+  // `origenDinero[]` — sin relacion con como pago el cliente (obs #2948,
+  // axis 3 independiente de axis 2). `cuentaId` para SESION_EFECTIVO es un
+  // `metodos_cobro.id` real (Decision 5), no una sesion.
+  const origenSesionActiva: OrigenDinero = {
+    tipo: 'SESION_EFECTIVO',
+    cuentaId: 'metodo-efectivo-usd',
+    monto: '30.00',
+  }
 
-  it('POS + origenDinero (array de 1 asignacion SESION_EFECTIVO) apunta a la propia sesion activa: inserta EGRESO en movimientos_metodo_cobro (origen NCR) con ese sesion_caja_id', async () => {
-    const calls = mockCrearNcrTx(
-      fixturesConPagos({ sesion_caja_id: 'sesion-activa-1' }, [
-        { id: 'pago-1', metodo_cobro_id: 'metodo-efectivo', monto: '30.00', moneda_id: 'usd-id' },
-      ])
-    )
+  it('POS + origenDinero (1 asignacion SESION_EFECTIVO en USD): inserta EGRESO en movimientos_metodo_cobro (origen NCR) con sesion_caja_id=sesionCajaActivaId y actualiza metodos_cobro.saldo_actual (real balance tracking)', async () => {
+    const calls = mockCrearNcrTx(fixturesConCuentas({ sesion_caja_id: 'sesion-activa-1' }))
 
     await crearNotaCredito(
       baseParams({
@@ -702,21 +749,18 @@ describe('crearNotaCredito — Slice 2 REWORK (origenDinero array, Design §Deci
     )
     expect(egresoInsert).toBeDefined()
     expect(egresoInsert!.sql).toContain('EGRESO')
-    expect(egresoInsert!.params).toContain('metodo-efectivo')
-    expect(egresoInsert!.params).toContain('30.00')
+    expect(egresoInsert!.params).toContain('metodo-efectivo-usd')
+    expect(egresoInsert!.params).toContain('30.00000000') // toStorageString, 8dp
     expect(egresoInsert!.params).toContain('sesion-activa-1')
 
-    const ncrInsert = calls.find((c) => c.sql.startsWith('INSERT INTO notas_credito'))
-    expect(ncrInsert).toBeDefined()
-    expect(ncrInsert!.params).toContain('sesion-activa-1')
+    const updateSaldo = calls.find((c) => c.sql.startsWith('UPDATE metodos_cobro SET saldo_actual'))
+    expect(updateSaldo).toBeDefined()
+    expect(updateSaldo!.params).toContain('470.00000000') // 500 - 30
+    expect(updateSaldo!.params).toContain('metodo-efectivo-usd')
   })
 
   it('DROP same-session-as-sale: POS + venta.sesion_caja_id de OTRA sesion (factura emitida en otra sesion) — SI inserta egreso en la sesion propia del cajero (el requisito "misma sesion que la venta" ya no existe)', async () => {
-    const calls = mockCrearNcrTx(
-      fixturesConPagos({ sesion_caja_id: 'sesion-vieja' }, [
-        { id: 'pago-1', metodo_cobro_id: 'metodo-efectivo', monto: '30.00', moneda_id: 'usd-id' },
-      ])
-    )
+    const calls = mockCrearNcrTx(fixturesConCuentas({ sesion_caja_id: 'sesion-vieja' }))
 
     await crearNotaCredito(
       baseParams({
@@ -736,9 +780,10 @@ describe('crearNotaCredito — Slice 2 REWORK (origenDinero array, Design §Deci
 
   it('Decision 4/5 — Tradicional con origenDinero apuntando a una sesion DISTINTA a la de emision (+ sesionDestinoId, exigido por Rule 6): SI inserta egreso en esa sesion (divergencia emision!=dinero intencional, obs #2938), y notas_credito.sesion_caja_id (emision) queda NULL', async () => {
     const calls = mockCrearNcrTx(
-      fixturesConPagos({ sesion_caja_id: null }, [
-        { id: 'pago-1', metodo_cobro_id: 'metodo-efectivo', monto: '30.00', moneda_id: 'usd-id' },
-      ])
+      fixturesConCuentas(
+        { sesion_caja_id: null },
+        { sesionesCaja: { 'sesion-B-de-otro-cajero': { status: 'ABIERTA' } } }
+      )
     )
 
     await crearNotaCredito(
@@ -746,7 +791,7 @@ describe('crearNotaCredito — Slice 2 REWORK (origenDinero array, Design §Deci
         entryPoint: 'TRADICIONAL',
         modalidad: 'EFECTIVO_REAL',
         sesionDestinoId: 'sesion-B-de-otro-cajero',
-        origenDinero: [{ tipo: 'SESION_EFECTIVO', cuentaId: 'sesion-B-de-otro-cajero', monto: '30.00' }],
+        origenDinero: [{ tipo: 'SESION_EFECTIVO', cuentaId: 'metodo-efectivo-usd', monto: '30.00' }],
       })
     )
 
@@ -765,7 +810,7 @@ describe('crearNotaCredito — Slice 2 REWORK (origenDinero array, Design §Deci
   })
 
   it('Tradicional SIN origenDinero, modalidad no-desembolso (AJUSTE_CXC): NO inserta egreso (comportamiento previo intacto para las modalidades sin efectivo)', async () => {
-    const calls = mockCrearNcrTx(fixturesConPagos({ sesion_caja_id: 'sesion-vieja' }, []))
+    const calls = mockCrearNcrTx(fixturesConCuentas({ sesion_caja_id: 'sesion-vieja' }))
 
     await crearNotaCredito(baseParams({ entryPoint: 'TRADICIONAL', modalidad: 'AJUSTE_CXC' }))
 
@@ -775,12 +820,17 @@ describe('crearNotaCredito — Slice 2 REWORK (origenDinero array, Design §Deci
     expect(egresoInsert).toBeUndefined()
   })
 
-  it('multiples metodos de pago originales: inserta UN egreso POR metodo (per-method), cada uno con su metodo_cobro_id y monto nativo — sin relacion con el tamano del array origenDinero (axis independiente, obs #2948)', async () => {
+  it('el write core NUNCA lee pagos originales (SELECT ... metodo_cobro_id, monto FROM pagos) para calcular el egreso — axis 3 desacoplado de axis 2 (obs #2948, task 3.8/3.14): 2 pagos originales de metodos distintos producen exactamente 1 egreso (== tamano de origenDinero, no de pagos)', async () => {
     const calls = mockCrearNcrTx(
-      fixturesConPagos({ sesion_caja_id: 'sesion-activa-1' }, [
-        { id: 'pago-1', metodo_cobro_id: 'metodo-efectivo', monto: '10.00', moneda_id: 'usd-id' },
-        { id: 'pago-2', metodo_cobro_id: 'metodo-tarjeta', monto: '800.00', moneda_id: 'bs-id' },
-      ])
+      fixturesConCuentas(
+        { sesion_caja_id: 'sesion-activa-1' },
+        {
+          pagos: [
+            { id: 'pago-1', metodo_cobro_id: 'metodo-efectivo', monto: '10.00', moneda_id: 'usd-id' },
+            { id: 'pago-2', metodo_cobro_id: 'metodo-tarjeta', monto: '20.00', moneda_id: 'usd-id' },
+          ],
+        }
+      )
     )
 
     await crearNotaCredito(
@@ -792,45 +842,22 @@ describe('crearNotaCredito — Slice 2 REWORK (origenDinero array, Design §Deci
       })
     )
 
+    const pagosSelect = calls.find((c) => c.sql.startsWith('SELECT id, metodo_cobro_id, monto FROM pagos'))
+    expect(pagosSelect).toBeUndefined()
+
     const egresos = calls.filter(
       (c) => c.sql.startsWith('INSERT INTO movimientos_metodo_cobro') && c.sql.includes("'NCR'")
     )
-    expect(egresos).toHaveLength(2)
-    expect(egresos.some((c) => c.params.includes('metodo-efectivo') && c.params.includes('10.00'))).toBe(true)
-    expect(egresos.some((c) => c.params.includes('metodo-tarjeta') && c.params.includes('800.00'))).toBe(true)
+    expect(egresos).toHaveLength(1)
+    expect(egresos[0]!.params).toContain('metodo-efectivo-usd')
   })
 
-  it('array con MULTIPLES asignaciones incluyendo SESION_EFECTIVO: usa la PRIMERA asignacion SESION_EFECTIVO del array como sesion_caja_id del egreso (comportamiento MINIMO de Slice 2 — el two-pass write real multi-cuenta es Slice 3a)', async () => {
+  it('marca is_reversed=1 para los pagos no reversados de la venta (NC tipo TOTAL) — axis 2, independiente del axis 3 de arriba', async () => {
     const calls = mockCrearNcrTx(
-      fixturesConPagos({ sesion_caja_id: 'sesion-activa-1' }, [
-        { id: 'pago-1', metodo_cobro_id: 'metodo-efectivo', monto: '30.00', moneda_id: 'usd-id' },
-      ])
-    )
-
-    await crearNotaCredito(
-      baseParams({
-        entryPoint: 'POS',
-        sesionCajaActivaId: 'sesion-activa-1',
-        modalidad: 'EFECTIVO_REAL',
-        origenDinero: [
-          { tipo: 'SESION_EFECTIVO', cuentaId: 'sesion-activa-1', monto: '30.00' },
-          { tipo: 'BANCO', cuentaId: 'banco-1', monto: '0.01' },
-        ],
-      })
-    )
-
-    const egresoInsert = calls.find(
-      (c) => c.sql.startsWith('INSERT INTO movimientos_metodo_cobro') && c.sql.includes("'NCR'")
-    )
-    expect(egresoInsert).toBeDefined()
-    expect(egresoInsert!.params).toContain('sesion-activa-1')
-  })
-
-  it('marca is_reversed=1 para los pagos no reversados de la venta (NC tipo TOTAL)', async () => {
-    const calls = mockCrearNcrTx(
-      fixturesConPagos({ sesion_caja_id: 'sesion-activa-1' }, [
-        { id: 'pago-1', metodo_cobro_id: 'metodo-efectivo', monto: '30.00', moneda_id: 'usd-id' },
-      ])
+      fixturesConCuentas(
+        { sesion_caja_id: 'sesion-activa-1' },
+        { pagos: [{ id: 'pago-1', metodo_cobro_id: 'metodo-efectivo', monto: '30.00', moneda_id: 'usd-id' }] }
+      )
     )
 
     await crearNotaCredito(
@@ -847,8 +874,8 @@ describe('crearNotaCredito — Slice 2 REWORK (origenDinero array, Design §Deci
     expect(reversa!.params).toContain('venta-1')
   })
 
-  it('sin pagos pendientes de reversar: no inserta egresos y no revienta (reversa is un no-op)', async () => {
-    const calls = mockCrearNcrTx(fixturesConPagos({ sesion_caja_id: 'sesion-activa-1' }, []))
+  it('CERO pagos originales (venta de credito sin abonos): el write core IGUAL inserta el egreso de origenDinero — la existencia del egreso NUNCA dependio de que existan pagos previos (decoupling completo)', async () => {
+    const calls = mockCrearNcrTx(fixturesConCuentas({ sesion_caja_id: 'sesion-activa-1' }, { pagos: [] }))
 
     await crearNotaCredito(
       baseParams({
@@ -862,10 +889,238 @@ describe('crearNotaCredito — Slice 2 REWORK (origenDinero array, Design §Deci
     const egresoInsert = calls.find(
       (c) => c.sql.startsWith('INSERT INTO movimientos_metodo_cobro') && c.sql.includes("'NCR'")
     )
-    expect(egresoInsert).toBeUndefined()
+    expect(egresoInsert).toBeDefined()
 
     const reversa = calls.find((c) => c.sql.startsWith('UPDATE pagos SET is_reversed'))
     expect(reversa).toBeDefined()
+  })
+})
+
+describe('crearNotaCredito — Slice 3a, Pass 1 sum-invariant (task 3.9): Σ(origenDinero→USD) ≤ remanenteALiquidar + epsilon(0.005)', () => {
+  function fixturesInvariante(cuentas: NcrTxFixtures['cuentas']) {
+    return {
+      venta: {
+        id: 'venta-1',
+        cliente_id: 'cliente-1',
+        nro_factura: 'C01-000001',
+        tasa: '40',
+        total_usd: '30.00',
+        total_bs: '1200.00',
+        saldo_pend_usd: '0.00', // remanenteALiquidar = 30.00 - 0 = 30.00
+        tipo: 'CONTADO',
+        status: 'ACTIVA',
+        deposito_id: 'dep-B',
+        sesion_caja_id: 'sesion-activa-1',
+      },
+      ventaDet: [{ producto_id: 'prod-1', cantidad: '3.000', lote_id: null }],
+      productos: { 'prod-1': { tipo: 'P', stock: '20.000', nombre: 'Producto 1' } },
+      inventarioStock: { 'prod-1::dep-B': '10.000' },
+      pagos: [],
+      sesionesCaja: { 'sesion-activa-1': { status: 'ABIERTA' } },
+      cuentas,
+    }
+  }
+
+  it('suma EXACTA al remanente (30.00 USD): acepta, no rechaza', async () => {
+    mockCrearNcrTx(
+      fixturesInvariante({ 'metodo-efectivo-usd': { saldo_actual: '500.00000000', moneda_codigo: 'USD' } })
+    )
+
+    await expect(
+      crearNotaCredito(
+        baseParams({
+          entryPoint: 'POS',
+          sesionCajaActivaId: 'sesion-activa-1',
+          modalidad: 'EFECTIVO_REAL',
+          origenDinero: [{ tipo: 'SESION_EFECTIVO', cuentaId: 'metodo-efectivo-usd', monto: '30.00' }],
+        })
+      )
+    ).resolves.toBeDefined()
+  })
+
+  it('suma en el BORDE del epsilon (30.005 USD, exactamente remanente+0.005): acepta, no rechaza', async () => {
+    mockCrearNcrTx(
+      fixturesInvariante({ 'metodo-efectivo-usd': { saldo_actual: '500.00000000', moneda_codigo: 'USD' } })
+    )
+
+    await expect(
+      crearNotaCredito(
+        baseParams({
+          entryPoint: 'POS',
+          sesionCajaActivaId: 'sesion-activa-1',
+          modalidad: 'EFECTIVO_REAL',
+          origenDinero: [{ tipo: 'SESION_EFECTIVO', cuentaId: 'metodo-efectivo-usd', monto: '30.005' }],
+        })
+      )
+    ).resolves.toBeDefined()
+  })
+
+  it('suma por ENCIMA del remanente+epsilon (30.01 USD): rechaza', async () => {
+    mockCrearNcrTx(
+      fixturesInvariante({ 'metodo-efectivo-usd': { saldo_actual: '500.00000000', moneda_codigo: 'USD' } })
+    )
+
+    await expect(
+      crearNotaCredito(
+        baseParams({
+          entryPoint: 'POS',
+          sesionCajaActivaId: 'sesion-activa-1',
+          modalidad: 'EFECTIVO_REAL',
+          origenDinero: [{ tipo: 'SESION_EFECTIVO', cuentaId: 'metodo-efectivo-usd', monto: '30.01' }],
+        })
+      )
+    ).rejects.toThrow(/excede el remanente/i)
+  })
+
+  it('cuentaId desconocido/no perteneciente a la empresa (ausente del filtro WHERE t.id=? AND t.empresa_id=?): rechaza', async () => {
+    mockCrearNcrTx(fixturesInvariante({})) // cuenta 'metodo-ajeno' nunca resuelve
+
+    await expect(
+      crearNotaCredito(
+        baseParams({
+          entryPoint: 'POS',
+          sesionCajaActivaId: 'sesion-activa-1',
+          modalidad: 'EFECTIVO_REAL',
+          origenDinero: [{ tipo: 'SESION_EFECTIVO', cuentaId: 'metodo-ajeno', monto: '10.00' }],
+        })
+      )
+    ).rejects.toThrow(/no existe|no pertenece/i)
+  })
+
+  it('conversion Bs→USD via tasa de la venta: 500 Bs a tasa 40 = 12.50 USD, dentro del remanente (30.00) — acepta', async () => {
+    mockCrearNcrTx(
+      fixturesInvariante({ 'metodo-efectivo-bs': { saldo_actual: '5000.00000000', moneda_codigo: 'VES' } })
+    )
+
+    await expect(
+      crearNotaCredito(
+        baseParams({
+          entryPoint: 'POS',
+          sesionCajaActivaId: 'sesion-activa-1',
+          modalidad: 'EFECTIVO_REAL',
+          origenDinero: [{ tipo: 'SESION_EFECTIVO', cuentaId: 'metodo-efectivo-bs', monto: '500' }],
+        })
+      )
+    ).resolves.toBeDefined()
+  })
+})
+
+describe('crearNotaCredito — Slice 3a, mixed-type multi-asignacion (task 3.10, ejemplo canonico del owner)', () => {
+  it('Bs500 SESION_EFECTIVO + Bs500 BANCO en UNA sola NC: escribe en movimientos_metodo_cobro Y movimientos_bancarios, guard de sesion cerrada evaluado UNA sola vez para toda la NC', async () => {
+    const calls = mockCrearNcrTx({
+      venta: {
+        id: 'venta-1',
+        cliente_id: 'cliente-1',
+        nro_factura: 'C01-000001',
+        tasa: '500',
+        total_usd: '2.00',
+        total_bs: '1000.00',
+        saldo_pend_usd: '0.00', // remanenteALiquidar = 2.00 USD
+        tipo: 'CONTADO',
+        status: 'ACTIVA',
+        deposito_id: 'dep-B',
+        sesion_caja_id: 'sesion-activa-1',
+      },
+      ventaDet: [{ producto_id: 'prod-1', cantidad: '3.000', lote_id: null }],
+      productos: { 'prod-1': { tipo: 'P', stock: '20.000', nombre: 'Producto 1' } },
+      inventarioStock: { 'prod-1::dep-B': '10.000' },
+      pagos: [],
+      sesionesCaja: { 'sesion-activa-1': { status: 'ABIERTA' } },
+      cuentas: {
+        'metodo-efectivo-bs': { saldo_actual: '5000.00000000', moneda_codigo: 'VES' },
+        'banco-1': { saldo_actual: '10000.00000000', moneda_codigo: 'VES' },
+      },
+    })
+
+    await crearNotaCredito(
+      baseParams({
+        entryPoint: 'POS',
+        sesionCajaActivaId: 'sesion-activa-1',
+        modalidad: 'EFECTIVO_REAL',
+        origenDinero: [
+          { tipo: 'SESION_EFECTIVO', cuentaId: 'metodo-efectivo-bs', monto: '500' },
+          { tipo: 'BANCO', cuentaId: 'banco-1', monto: '500' },
+        ],
+      })
+    )
+
+    const egresoSesion = calls.find(
+      (c) => c.sql.startsWith('INSERT INTO movimientos_metodo_cobro') && c.sql.includes("'NCR'")
+    )
+    expect(egresoSesion).toBeDefined()
+    expect(egresoSesion!.params).toContain('500.00000000')
+    expect(egresoSesion!.params).toContain('sesion-activa-1')
+
+    const egresoBanco = calls.find((c) => c.sql.startsWith('INSERT INTO movimientos_bancarios'))
+    expect(egresoBanco).toBeDefined()
+    expect(egresoBanco!.sql).toContain('REFUND_NCR')
+    expect(egresoBanco!.params).toContain('500.00000000')
+    expect(egresoBanco!.params).toContain('banco-1')
+
+    // Guard de sesion cerrada: evaluado UNA sola vez para toda la NC, no
+    // una vez por asignacion SESION_EFECTIVO (Design §Decision 4/5).
+    const sesionChecks = calls.filter((c) => c.sql.startsWith('SELECT status FROM sesiones_caja'))
+    expect(sesionChecks).toHaveLength(1)
+
+    // Real balance tracking: metodos_cobro.saldo_actual Y bancos_empresa.saldo_actual ambos actualizados.
+    const updateMetodo = calls.find((c) => c.sql.startsWith('UPDATE metodos_cobro SET saldo_actual'))
+    const updateBanco = calls.find((c) => c.sql.startsWith('UPDATE bancos_empresa SET saldo_actual'))
+    expect(updateMetodo).toBeDefined()
+    expect(updateBanco).toBeDefined()
+  })
+
+  it('sesion destino CERRADA: rechaza ANTES de escribir cualquier egreso (guard evaluado antes del loop de Pass 1)', async () => {
+    const calls = mockCrearNcrTx({
+      venta: {
+        id: 'venta-1',
+        cliente_id: 'cliente-1',
+        nro_factura: 'C01-000001',
+        tasa: '40',
+        total_usd: '30.00',
+        total_bs: '1200.00',
+        saldo_pend_usd: '0.00',
+        tipo: 'CONTADO',
+        status: 'ACTIVA',
+        deposito_id: 'dep-B',
+        sesion_caja_id: 'sesion-activa-1',
+      },
+      ventaDet: [{ producto_id: 'prod-1', cantidad: '3.000', lote_id: null }],
+      productos: { 'prod-1': { tipo: 'P', stock: '20.000', nombre: 'Producto 1' } },
+      inventarioStock: { 'prod-1::dep-B': '10.000' },
+      pagos: [],
+      sesionesCaja: { 'sesion-activa-1': { status: 'CERRADA' } },
+      cuentas: { 'metodo-efectivo-usd': { saldo_actual: '500.00000000', moneda_codigo: 'USD' } },
+    })
+
+    await expect(
+      crearNotaCredito(
+        baseParams({
+          entryPoint: 'POS',
+          sesionCajaActivaId: 'sesion-activa-1',
+          modalidad: 'EFECTIVO_REAL',
+          origenDinero: [{ tipo: 'SESION_EFECTIVO', cuentaId: 'metodo-efectivo-usd', monto: '30.00' }],
+        })
+      )
+    ).rejects.toThrow(/cerrada/i)
+
+    expect(calls.find((c) => c.sql.startsWith('INSERT INTO movimientos_metodo_cobro'))).toBeUndefined()
+  })
+})
+
+describe('crearNotaCredito — Slice 3a, ausencia del modelo FIFO viejo (task 3.8)', () => {
+  it('el modulo NO referencia capearEgresosPorRemanente/PagoParaReversaEfectivo/EgresoReversaCapeado (modelo FIFO-sobre-pagos removido por completo — nunca existio en esta rama, confirmado por lectura de codigo)', async () => {
+    const fs = await import('node:fs/promises')
+    const path = await import('node:path')
+    const sourcePath = path.resolve(__dirname, '../use-notas-credito.ts')
+    const source = await fs.readFile(sourcePath, 'utf-8')
+
+    expect(source).not.toMatch(/capearEgresosPorRemanente/)
+    expect(source).not.toMatch(/PagoParaReversaEfectivo/)
+    expect(source).not.toMatch(/EgresoReversaCapeado/)
+    // La SELECT que alimentaba el modelo viejo (leer pagos para calcular el
+    // egreso) tambien debe estar ausente — el write core solo lee `pagos`
+    // para el UPDATE is_reversed (axis 2), nunca para el monto del egreso.
+    expect(source).not.toMatch(/SELECT id, metodo_cobro_id, monto FROM pagos/)
   })
 })
 

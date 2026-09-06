@@ -3,7 +3,7 @@ import { db } from '@/core/db/powersync/db'
 import { useCurrentUser } from '@/core/hooks/use-current-user'
 import { v4 as uuidv4 } from 'uuid'
 import Decimal from 'decimal.js'
-import { toStorageString, usdToBs } from '@/lib/currency'
+import { bsToUsd, toStorageString, usdToBs } from '@/lib/currency'
 import { localNow } from '@/lib/dates'
 import { cargarMapaCuentas } from '@/features/contabilidad/hooks/use-cuentas-config'
 import { generarAsientosNCR } from '@/features/contabilidad/lib/generar-asientos'
@@ -938,6 +938,14 @@ export async function crearNotaCredito(
     const montoAplicadoAPendiente = Decimal.min(saldoPendVenta, totalUsdNc)
     const nuevoSaldoPendVenta = Decimal.max(new Decimal(0), saldoPendVenta.minus(totalUsdNc))
 
+    // Hoisted (Slice 3a, Design §Remanente reintegrable, obs #2945): antes
+    // se calculaba recien en Step B (paso 9), DESPUES del write branch de
+    // dinero (paso 6c) que ahora lo necesita como tope de entrada del
+    // invariante de suma de Pass 1 (`montoADevolverUsd ≤ remanenteALiquidar
+    // + epsilon`) — por eso se adelanta aqui, inmediatamente despues de
+    // conocer `montoAplicadoAPendiente`.
+    const remanenteALiquidar = Decimal.max(new Decimal(0), totalUsdNc.minus(montoAplicadoAPendiente))
+
     if (montoAplicadoAPendiente.gt('0.01')) {
       const clienteResult = await tx.execute('SELECT saldo_actual FROM clientes WHERE id = ?', [
         venta.cliente_id,
@@ -989,74 +997,198 @@ export async function crearNotaCredito(
       // DIFE reversal opcional — no bloquea la anulación
     }
 
-    // 6c. Regla de Oro (Design §4, obs #2804): reversar los pagos originales
-    //     de la venta y, SOLO si aplica la condicion de ambito+sesion, dejar
-    //     un egreso por metodo en `movimientos_metodo_cobro` (origen 'NCR')
-    //     para que el cuadre de la sesion activa refleje la salida real de
-    //     efectivo/tarjeta — sin tocar `use-cuadre.ts`, que ya suma cualquier
-    //     EGRESO no excluido (aditivo, cero cambios de formula). SOLO para
-    //     tipo='TOTAL' (Design §3 paso 8: "PARCIAL nunca reversa pagos,
-    //     siguen siendo validos por el saldo remanente" — el unico llamador
-    //     de PARCIAL hoy fuerza entryPoint TRADICIONAL, que nunca dispara
-    //     la Regla de Oro; EFECTIVO_REAL+PARCIAL vía POS queda deferido a
-    //     Slice 5a, cuando exista ese entry point).
-    if (tipoNc === 'TOTAL') {
-      const pagosResult = await tx.execute(
-        'SELECT id, metodo_cobro_id, monto FROM pagos WHERE venta_id = ? AND is_reversed = 0',
-        [venta_id]
-      )
+    // 6c. Two-pass write core sobre `origenDinero[]` (Slice 3a, Design
+    //     §Decision 5 Pass 1/Pass 2, obs #2948/#2949): DESACOPLADO por
+    //     completo de los `pagos` originales de la venta (axis 3, obs
+    //     #2948) — reemplaza el loop de Slice 1/2 que reversaba pago-por-
+    //     pago 1:1. SOLO para tipo='TOTAL' (Design §3 paso 8: "PARCIAL
+    //     nunca reversa pagos" — el unico llamador de PARCIAL hoy fuerza
+    //     entryPoint TRADICIONAL, que nunca dispara movesCash via este
+    //     slice; EFECTIVO_REAL+PARCIAL vía POS queda deferido a Slice 5a).
+    if (tipoNc === 'TOTAL' && movesCash) {
+      const asignaciones = origenDinero ?? []
+      const tieneSesionEfectivo = asignaciones.some((a) => a.tipo === 'SESION_EFECTIVO')
 
-      // Slice 2 REWORK (deviation, Design §Decision 5): este loop TODAVIA
-      // NO implementa el two-pass multi-cuenta real (eso es Slice 3a/3b) —
-      // sigue reversando CADA pago original 1:1 en `movimientos_metodo_cobro`
-      // (comportamiento Slice 1/2 sin cambios). Lo UNICO que el array
-      // `origenDinero` aporta en este slice es la cuenta que se estampa en
-      // `sesion_caja_id`: se toma la PRIMERA asignacion `SESION_EFECTIVO`
-      // del array (equivalente exacto del objeto unico pre-rework cuando el
-      // array tiene una sola asignacion de ese tipo — el unico caso que
-      // los llamadores actuales, pre-Slice-4, producen).
-      const sesionEfectivoAsignacion = origenDinero?.find((a) => a.tipo === 'SESION_EFECTIVO')
+      // Sesion destino resuelta UNA sola vez para TODA la NC (Decision 5
+      // "simplificacion deliberada" — nunca por asignacion). Guard de
+      // sesion cerrada evaluado aqui, ANTES de abrir el loop de Pass 1
+      // (Design §Decision 4 "Guard"). Filtra por empresa_id — nunca
+      // replicar el gap de `use-traspasos.ts:396` (sin ese filtro).
+      let sesionDestino: string | null = null
+      if (tieneSesionEfectivo) {
+        sesionDestino = entryPoint === 'POS' ? sesionCajaActivaId ?? null : sesionDestinoId ?? null
+        const sesionResult = await tx.execute(
+          'SELECT status FROM sesiones_caja WHERE id = ? AND empresa_id = ?',
+          [sesionDestino, empresa_id]
+        )
+        if (!sesionResult.rows || sesionResult.rows.length === 0) {
+          throw new Error(
+            'La sesion de caja destino del reintegro no existe o no pertenece a la empresa'
+          )
+        }
+        const sesionRow = sesionResult.rows.item(0) as { status: string }
+        if (sesionRow.status === 'CERRADA') {
+          throw new Error(
+            'La sesion de caja destino del reintegro esta CERRADA — no se puede reintegrar efectivo ahi'
+          )
+        }
+      }
 
-      if (movesCash && pagosResult.rows) {
-        for (let i = 0; i < pagosResult.rows.length; i++) {
-          const pago = pagosResult.rows.item(i) as {
-            id: string
-            metodo_cobro_id: string
-            monto: string
-          }
+      // Pass 1 (resolver + acumular, SIN escrituras — Design §Decision 5):
+      // cada asignacion tiene una cuenta real propia (metodos_cobro /
+      // caja_fuerte / bancos_empresa) con su moneda FIJA — se lee su
+      // `saldo_actual` + moneda para convertir el monto nativo a USD (via
+      // la tasa de LA VENTA, fotografia bimonetaria) y poder sumar todas
+      // las asignaciones en una base comun antes de escribir nada.
+      const TABLA_POR_TIPO: Record<OrigenDinero['tipo'], string> = {
+        SESION_EFECTIVO: 'metodos_cobro',
+        TESORERIA_EFECTIVO: 'caja_fuerte',
+        BANCO: 'bancos_empresa',
+      }
 
+      let montoADevolverUsd = new Decimal(0)
+      const resueltas: Array<{
+        tipo: OrigenDinero['tipo']
+        cuentaId: string
+        monto: Decimal
+        saldoActual: Decimal
+      }> = []
+
+      for (const asignacion of asignaciones) {
+        const tabla = TABLA_POR_TIPO[asignacion.tipo]
+        const cuentaResult = await tx.execute(
+          `SELECT t.saldo_actual as saldo_actual, m.codigo_iso as moneda_codigo
+             FROM ${tabla} t JOIN monedas m ON m.id = t.moneda_id
+            WHERE t.id = ? AND t.empresa_id = ?`,
+          [asignacion.cuentaId, empresa_id]
+        )
+        if (!cuentaResult.rows || cuentaResult.rows.length === 0) {
+          throw new Error(
+            `La cuenta '${asignacion.cuentaId}' (${asignacion.tipo}) no existe o no pertenece a la empresa`
+          )
+        }
+        const cuentaRow = cuentaResult.rows.item(0) as { saldo_actual: string; moneda_codigo: string }
+        const montoNativo = new Decimal(asignacion.monto)
+        const montoUsd =
+          cuentaRow.moneda_codigo === 'VES' ? bsToUsd(montoNativo, venta.tasa) : montoNativo
+
+        montoADevolverUsd = montoADevolverUsd.plus(montoUsd)
+        resueltas.push({
+          tipo: asignacion.tipo,
+          cuentaId: asignacion.cuentaId,
+          monto: montoNativo,
+          saldoActual: new Decimal(cuentaRow.saldo_actual),
+        })
+      }
+
+      const EPSILON = new Decimal('0.005')
+      if (montoADevolverUsd.gt(remanenteALiquidar.plus(EPSILON))) {
+        throw new Error(
+          `El monto a devolver (${montoADevolverUsd.toFixed(2)} USD) excede el remanente disponible de la factura (${remanenteALiquidar.toFixed(2)} USD)`
+        )
+      }
+
+      // Pass 2 (escritura — solo tras validar Pass 1 completo, atomicidad
+      // regla de negocio #9): loop UNIFORME sobre los 3 tipos de cuenta, la
+      // misma forma para todos salvo la tabla/columnas de cada ledger.
+      // `metodos_cobro.saldo_actual` recibe el MISMO real-balance tracking
+      // que `caja_fuerte`/`bancos_empresa` (Design §Decision 1 extension).
+      for (const r of resueltas) {
+        const saldoNuevo = r.saldoActual.minus(r.monto)
+
+        if (r.tipo === 'SESION_EFECTIVO') {
           await tx.execute(
             `INSERT INTO movimientos_metodo_cobro
                (id, empresa_id, metodo_cobro_id, tipo, origen, monto, saldo_anterior, saldo_nuevo,
                 doc_origen_id, doc_origen_ref, concepto, sesion_caja_id, fecha, created_at, created_by)
-             VALUES (?, ?, ?, 'EGRESO', 'NCR', ?, 0, 0, ?, ?, ?, ?, ?, ?, ?)`,
+             VALUES (?, ?, ?, 'EGRESO', 'NCR', ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
             [
               uuidv4(),
               empresa_id,
-              pago.metodo_cobro_id,
-              pago.monto,
+              r.cuentaId,
+              toStorageString(r.monto),
+              toStorageString(r.saldoActual),
+              toStorageString(saldoNuevo),
               ncrId,
               `NCR-${nroNcr}`,
               `Devolucion NCR ${nroNcr} - Venta ${venta.nro_factura}`,
-              // Slice 2 REWORK (Decision 4/5 cuadre invariant): la cuenta
-              // que ve el egreso es la ELEGIDA por origenDinero, no la del
-              // cajero que emite la NC. `movesCash` solo es true para
-              // EFECTIVO_REAL dentro de esta tx (REFUND_TESORERIA ya lanzo
-              // mas arriba, antes de abrir la transaccion) y
-              // `validarOrigenDinero` ya garantizo que si el array llego
-              // hasta aqui, es no-vacio.
-              sesionEfectivoAsignacion?.cuentaId ?? null,
+              sesionDestino,
               now,
               now,
               usuario_id,
             ]
           )
+          await tx.execute(
+            'UPDATE metodos_cobro SET saldo_actual = ?, updated_at = ? WHERE id = ? AND empresa_id = ?',
+            [toStorageString(saldoNuevo), now, r.cuentaId, empresa_id]
+          )
+        } else if (r.tipo === 'TESORERIA_EFECTIVO') {
+          await tx.execute(
+            `INSERT INTO mov_caja_fuerte
+               (id, empresa_id, caja_fuerte_id, tipo, origen, monto, saldo_anterior, saldo_nuevo,
+                doc_origen_id, doc_origen_tipo, referencia, descripcion, validado, reversado, fecha, created_at, created_by)
+             VALUES (?, ?, ?, 'EGRESO', 'REFUND_NCR', ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+            [
+              uuidv4(),
+              empresa_id,
+              r.cuentaId,
+              toStorageString(r.monto),
+              toStorageString(r.saldoActual),
+              toStorageString(saldoNuevo),
+              ncrId,
+              'NOTA_CREDITO',
+              `NCR-${nroNcr}`,
+              `Devolucion NCR ${nroNcr} - Venta ${venta.nro_factura}`,
+              1,
+              0,
+              now,
+              now,
+              usuario_id,
+            ]
+          )
+          await tx.execute(
+            'UPDATE caja_fuerte SET saldo_actual = ?, updated_at = ? WHERE id = ? AND empresa_id = ?',
+            [toStorageString(saldoNuevo), now, r.cuentaId, empresa_id]
+          )
+        } else {
+          await tx.execute(
+            `INSERT INTO movimientos_bancarios
+               (id, empresa_id, banco_empresa_id, tipo, origen, monto, saldo_anterior, saldo_nuevo,
+                doc_origen_id, doc_origen_tipo, referencia, descripcion, validado, reversado, fecha, created_at, created_by)
+             VALUES (?, ?, ?, 'EGRESO', 'REFUND_NCR', ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+            [
+              uuidv4(),
+              empresa_id,
+              r.cuentaId,
+              toStorageString(r.monto),
+              toStorageString(r.saldoActual),
+              toStorageString(saldoNuevo),
+              ncrId,
+              'NOTA_CREDITO',
+              `NCR-${nroNcr}`,
+              `Devolucion NCR ${nroNcr} - Venta ${venta.nro_factura}`,
+              1,
+              0,
+              now,
+              now,
+              usuario_id,
+            ]
+          )
+          await tx.execute(
+            'UPDATE bancos_empresa SET saldo_actual = ?, updated_at = ? WHERE id = ? AND empresa_id = ?',
+            [toStorageString(saldoNuevo), now, r.cuentaId, empresa_id]
+          )
         }
       }
+    }
 
-      // Reversa de pagos: siempre que la NC sea TOTAL, sin importar el ambito
-      // (POS o Tradicional) — evita que el pago original siga contando como
-      // ingreso valido en los totales por metodo (gap #3 en obs #2803).
+    // Reversa de pagos (axis 2, Design §3 paso 8 — INDEPENDIENTE del axis 3
+    // de arriba, obs #2948): siempre que la NC sea TOTAL, sin importar el
+    // ambito (POS o Tradicional) — evita que el pago original siga contando
+    // como ingreso valido en los totales por metodo (gap #3 en obs #2803).
+    // YA NO se leen los pagos para calcular ningun egreso (esa relacion se
+    // rompio por completo, obs #2948) — solo se marcan is_reversed=1.
+    if (tipoNc === 'TOTAL') {
       await tx.execute(
         `UPDATE pagos SET is_reversed = 1, reversed_at = ?, reversed_by = ?, reversed_reason = ?
          WHERE venta_id = ? AND is_reversed = 0`,
@@ -1070,10 +1202,10 @@ export async function crearNotaCredito(
     //     modalidad elegida. Para TOTAL es identico a la formula pre-4b
     //     (montoAplicadoAPendiente === saldoPendVenta); para PARCIAL queda
     //     escopeado a las lineas seleccionadas. EFECTIVO_REAL no entra a
-    //     este switch: su liquidacion ES el egreso condicional de la Regla
-    //     de Oro (paso 6c/10), no un movimiento de cuenta adicional.
-    const remanenteALiquidar = totalUsdNc.minus(montoAplicadoAPendiente)
-
+    //     este switch: su liquidacion ES el egreso condicional del two-pass
+    //     write core (paso 6c), no un movimiento de cuenta adicional.
+    //     `remanenteALiquidar` ya fue hoisted arriba (Slice 3a, antes de
+    //     paso 6c) — no se redeclara aqui.
     if (remanenteALiquidar.gt('0.01')) {
       if (modalidad === 'SALDO_FAVOR' || modalidad === 'COMPENSACION_VENTA') {
         // SALDO_FAVOR y COMPENSACION_VENTA dejan el MISMO SAFC trazable
