@@ -1088,7 +1088,7 @@ export function ProductoForm({ isOpen, onClose, producto }: ProductoFormProps) {
       ref={dialogRef}
       onClose={onClose}
       onClick={handleBackdropClick}
-      className="backdrop:bg-black/50 rounded-xl p-0 w-full max-w-2xl shadow-2xl overflow-hidden"
+      className="backdrop:bg-black/50 rounded-xl p-0 w-[calc(100vw-2rem)] max-w-2xl shadow-2xl overflow-hidden"
     >
       <form onSubmit={handleSubmit} className="flex flex-col max-h-[90vh]">
 
@@ -1241,7 +1241,7 @@ export function ProductoForm({ isOpen, onClose, producto }: ProductoFormProps) {
             TABS NAV
         ============================================================ */}
         <div className="flex-none bg-white border-b border-gray-200 px-6 overflow-x-auto">
-          <div className="flex -mb-px">
+          <div className="flex -mb-px w-max min-w-full">
             {tabs.map((tab) => (
               <button
                 key={tab.id}
