@@ -755,7 +755,10 @@ describe('crearNotaCredito — Slice 3a (two-pass write core sobre origenDinero[
 
     const updateSaldo = calls.find((c) => c.sql.startsWith('UPDATE metodos_cobro SET saldo_actual'))
     expect(updateSaldo).toBeDefined()
-    expect(updateSaldo!.params).toContain('470.00000000') // 500 - 30
+    // W1 (verify-report): metodos_cobro.saldo_actual usa .toFixed(4), NO
+    // toStorageString — matching use-traspasos.ts:938's convention para esa
+    // columna exacta.
+    expect(updateSaldo!.params).toContain('470.0000') // 500 - 30
     expect(updateSaldo!.params).toContain('metodo-efectivo-usd')
   })
 
@@ -1054,7 +1057,9 @@ describe('crearNotaCredito — Slice 3a, mixed-type multi-asignacion (task 3.10,
     const egresoBanco = calls.find((c) => c.sql.startsWith('INSERT INTO movimientos_bancarios'))
     expect(egresoBanco).toBeDefined()
     expect(egresoBanco!.sql).toContain('REFUND_NCR')
-    expect(egresoBanco!.params).toContain('500.00000000')
+    // W1: movimientos_bancarios' OWN monto/saldo_anterior/saldo_nuevo usan
+    // .toFixed(4), matching use-traspasos.ts:938's convention.
+    expect(egresoBanco!.params).toContain('500.0000')
     expect(egresoBanco!.params).toContain('banco-1')
 
     // Guard de sesion cerrada: evaluado UNA sola vez para toda la NC, no
@@ -1195,7 +1200,9 @@ describe('crearNotaCredito — Slice 3b, guard de disponibilidad de efectivo (ta
 
     const updateBanco = calls.find((c) => c.sql.startsWith('UPDATE bancos_empresa SET saldo_actual'))
     expect(updateBanco).toBeDefined()
-    expect(updateBanco!.params).toContain('-100.00000000') // 500 - 600, sobregiro permitido
+    // W1: bancos_empresa.saldo_actual usa .toFixed(4), matching
+    // use-traspasos.ts:938's convention para esa columna exacta.
+    expect(updateBanco!.params).toContain('-100.0000') // 500 - 600, sobregiro permitido
   })
 })
 
@@ -1413,6 +1420,80 @@ describe('crearNotaCredito — Slice 3 (modalidades de liquidacion + gate anti-f
     })
   })
 
+  describe('guard PARCIAL + desembolso (W2, verify-report — defensa en profundidad a nivel de funcion)', () => {
+    it('crearNotaCredito: rechaza ANTES de abrir la transaccion cuando tipo=PARCIAL + modalidad EFECTIVO_REAL con origenDinero poblado (sin este guard, el remanente se reenrutaria en silencio a SAFC)', async () => {
+      mockCrearNcrTx(fixturesModalidad())
+
+      await expect(
+        crearNotaCredito(
+          baseParams({
+            entryPoint: 'POS',
+            sesionCajaActivaId: 'sesion-activa-1',
+            modalidad: 'EFECTIVO_REAL',
+            tipo: 'PARCIAL',
+            lineas: [{ venta_det_id: 'vdet-A', cantidadDevolver: '1.000' }],
+            origenDinero: [{ tipo: 'SESION_EFECTIVO', cuentaId: 'metodo-efectivo-usd', monto: '10.00' }],
+          })
+        )
+      ).rejects.toThrow(/PARCIAL/i)
+
+      expect(mockedDb.writeTransaction).not.toHaveBeenCalled()
+    })
+
+    it('crearNotaCredito: rechaza ANTES de abrir la transaccion cuando tipo=PARCIAL + modalidad REFUND_TESORERIA con origenDinero poblado', async () => {
+      mockCrearNcrTx(fixturesModalidad())
+
+      await expect(
+        crearNotaCredito(
+          baseParams({
+            entryPoint: 'TRADICIONAL',
+            sesionDestinoId: 'sesion-b',
+            modalidad: 'REFUND_TESORERIA',
+            tipo: 'PARCIAL',
+            lineas: [{ venta_det_id: 'vdet-A', cantidadDevolver: '1.000' }],
+            origenDinero: [{ tipo: 'BANCO', cuentaId: 'banco-1', monto: '10.00' }],
+          })
+        )
+      ).rejects.toThrow(/PARCIAL/i)
+
+      expect(mockedDb.writeTransaction).not.toHaveBeenCalled()
+    })
+
+    it('crearNotaCredito: PARCIAL + modalidad AJUSTE_CXC (sin desembolso, sin origenDinero) NO dispara el guard W2 — sigue funcionando (credito a favor por linea)', async () => {
+      const calls = mockCrearNcrTx({
+        ...fixturesModalidad(),
+        ventaDet: [
+          {
+            id: 'vdet-A',
+            producto_id: 'prod-A',
+            cantidad: '4.000',
+            lote_id: null,
+            precio_unitario_usd: '10.00',
+            tipo_impuesto: 'Gravable',
+            impuesto_pct: '16',
+          },
+        ],
+        productos: { 'prod-A': { tipo: 'P', stock: '50.000', nombre: 'Producto A' } },
+        inventarioStock: { 'prod-A::dep-B': '10.000' },
+      })
+
+      await expect(
+        crearNotaCredito(
+          baseParams({
+            entryPoint: 'TRADICIONAL',
+            modalidad: 'AJUSTE_CXC',
+            tipo: 'PARCIAL',
+            lineas: [{ venta_det_id: 'vdet-A', cantidadDevolver: '2.000' }],
+          })
+        )
+      ).resolves.toMatchObject({ ncrId: expect.any(String), nroNcr: expect.any(String) })
+
+      expect(mockedDb.writeTransaction).toHaveBeenCalledTimes(1)
+      const ncrInsert = calls.find((c) => c.sql.startsWith('INSERT INTO notas_credito ('))
+      expect(ncrInsert!.params).toContain('PARCIAL')
+    })
+  })
+
   it('crearNotaCredito: el gate rechaza ANTES de abrir la transaccion — llamada directa (bypass de UI) con modalidad SALDO_FAVOR + egresoParams forzado', async () => {
     mockCrearNcrTx(fixturesModalidad())
 
@@ -1451,7 +1532,8 @@ describe('crearNotaCredito — Slice 3 (modalidades de liquidacion + gate anti-f
     const egresoBanco = calls.find((c) => c.sql.startsWith('INSERT INTO movimientos_bancarios'))
     expect(egresoBanco).toBeDefined()
     expect(egresoBanco!.sql).toContain('REFUND_NCR')
-    expect(egresoBanco!.params).toContain('30.00000000')
+    // W1: movimientos_bancarios' OWN monto usa .toFixed(4).
+    expect(egresoBanco!.params).toContain('30.0000')
     expect(egresoBanco!.params).toContain('banco-1')
 
     const ncrInsert = calls.find((c) => c.sql.startsWith('INSERT INTO notas_credito'))
@@ -1463,7 +1545,8 @@ describe('crearNotaCredito — Slice 3 (modalidades de liquidacion + gate anti-f
 
     const updateBanco = calls.find((c) => c.sql.startsWith('UPDATE bancos_empresa SET saldo_actual'))
     expect(updateBanco).toBeDefined()
-    expect(updateBanco!.params).toContain('970.00000000') // 1000 - 30, saldo actualizado
+    // W1: bancos_empresa.saldo_actual usa .toFixed(4).
+    expect(updateBanco!.params).toContain('970.0000') // 1000 - 30, saldo actualizado
   })
 
   it('crearNotaCredito: REFUND_TESORERIA con array MIXTO (SESION_EFECTIVO + BANCO, entryPoint TRADICIONAL con sesionDestinoId) escribe ambos egresos — misma forma que EFECTIVO_REAL (design.md: ambas modalidades son funcionalmente identicas al escribir, solo cambia el valor de auditoria)', async () => {
@@ -1513,7 +1596,8 @@ describe('crearNotaCredito — Slice 3 (modalidades de liquidacion + gate anti-f
 
     const egresoBanco = calls.find((c) => c.sql.startsWith('INSERT INTO movimientos_bancarios'))
     expect(egresoBanco).toBeDefined()
-    expect(egresoBanco!.params).toContain('500.00000000')
+    // W1: movimientos_bancarios' OWN monto usa .toFixed(4).
+    expect(egresoBanco!.params).toContain('500.0000')
     expect(egresoBanco!.params).toContain('banco-1')
   })
 

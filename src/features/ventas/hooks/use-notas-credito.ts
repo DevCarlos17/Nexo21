@@ -509,6 +509,28 @@ export async function crearNotaCredito(
   // sin tocar la DB. Ver `validarOrigenDinero`.
   validarOrigenDinero({ modalidad, entryPoint, sesionCajaActivaId, sesionDestinoId, origenDinero })
 
+  // 0d. Guard PARCIAL + desembolso (verify-report §W2, defensa en
+  // profundidad a nivel de funcion — mismo espiritu que
+  // `assertGateAntiFraudeNoDesembolso`, evaluado ANTES de abrir la
+  // transaccion, sin tocar la DB). El two-pass write core (paso 6c) SOLO
+  // corre para `tipoNc==='TOTAL' && movesCash` — sin este guard, una NC
+  // PARCIAL con una modalidad de desembolso (`EFECTIVO_REAL`/
+  // `REFUND_TESORERIA`) y un `origenDinero` poblado se reenrutaria en
+  // silencio a credito SAFC por el remanente completo (Step B), ignorando
+  // el pedido de reintegro en efectivo/tesoreria del llamador. Ambos
+  // modales de UI ya bloquean esta combinacion — este throw la hace
+  // inalcanzable tambien por construccion para cualquier llamador directo
+  // que bypasee la UI. NO afecta PARCIAL + modalidad sin desembolso
+  // (AJUSTE_CXC/credito a favor): esa combinacion sigue funcionando
+  // (`movesCash` es `false` ahi, el guard no dispara).
+  const tipoNcParaGuardPreTx: 'TOTAL' | 'PARCIAL' = tipo ?? 'TOTAL'
+  const movesCashParaGuardPreTx = !esModalidadNoDesembolso(modalidad)
+  if (tipoNcParaGuardPreTx === 'PARCIAL' && movesCashParaGuardPreTx) {
+    throw new Error(
+      'No se puede devolver dinero en una nota de credito PARCIAL (el reintegro en efectivo/tesoreria solo aplica a NC TOTAL)'
+    )
+  }
+
   let ncrId = ''
   let nroNcr = ''
 
@@ -1149,7 +1171,12 @@ export async function crearNotaCredito(
           )
           await tx.execute(
             'UPDATE metodos_cobro SET saldo_actual = ?, updated_at = ? WHERE id = ? AND empresa_id = ?',
-            [toStorageString(saldoNuevo), now, r.cuentaId, empresa_id]
+            // W1 (verify-report): balance write on metodos_cobro.saldo_actual
+            // uses .toFixed(4) matching use-traspasos.ts:938's convention for
+            // this exact column — NOT toStorageString (that stays only on
+            // movimientos_metodo_cobro's OWN ledger row above, per
+            // use-ventas.ts:825's convention for that table).
+            [saldoNuevo.toFixed(4), now, r.cuentaId, empresa_id]
           )
         } else if (r.tipo === 'TESORERIA_EFECTIVO') {
           await tx.execute(
@@ -1161,9 +1188,12 @@ export async function crearNotaCredito(
               uuidv4(),
               empresa_id,
               r.cuentaId,
-              toStorageString(r.monto),
-              toStorageString(r.saldoActual),
-              toStorageString(saldoNuevo),
+              // W1: mov_caja_fuerte monto/saldo_anterior/saldo_nuevo use
+              // .toFixed(4), matching use-traspasos.ts:938's convention for
+              // this exact ledger table (design.md Decision 1).
+              r.monto.toFixed(4),
+              r.saldoActual.toFixed(4),
+              saldoNuevo.toFixed(4),
               ncrId,
               'NOTA_CREDITO',
               `NCR-${nroNcr}`,
@@ -1177,7 +1207,7 @@ export async function crearNotaCredito(
           )
           await tx.execute(
             'UPDATE caja_fuerte SET saldo_actual = ?, updated_at = ? WHERE id = ? AND empresa_id = ?',
-            [toStorageString(saldoNuevo), now, r.cuentaId, empresa_id]
+            [saldoNuevo.toFixed(4), now, r.cuentaId, empresa_id]
           )
         } else {
           await tx.execute(
@@ -1189,9 +1219,12 @@ export async function crearNotaCredito(
               uuidv4(),
               empresa_id,
               r.cuentaId,
-              toStorageString(r.monto),
-              toStorageString(r.saldoActual),
-              toStorageString(saldoNuevo),
+              // W1: movimientos_bancarios monto/saldo_anterior/saldo_nuevo
+              // use .toFixed(4), matching use-traspasos.ts:938's convention
+              // for this exact ledger table (design.md Decision 1).
+              r.monto.toFixed(4),
+              r.saldoActual.toFixed(4),
+              saldoNuevo.toFixed(4),
               ncrId,
               'NOTA_CREDITO',
               `NCR-${nroNcr}`,
@@ -1205,7 +1238,7 @@ export async function crearNotaCredito(
           )
           await tx.execute(
             'UPDATE bancos_empresa SET saldo_actual = ?, updated_at = ? WHERE id = ? AND empresa_id = ?',
-            [toStorageString(saldoNuevo), now, r.cuentaId, empresa_id]
+            [saldoNuevo.toFixed(4), now, r.cuentaId, empresa_id]
           )
         }
       }
