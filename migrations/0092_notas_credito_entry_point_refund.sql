@@ -44,6 +44,14 @@
 -- constrained NOT NULL + DEFAULT + CHECK — adding NOT NULL before backfill
 -- would fail on any existing row.
 --
+-- IMMUTABILITY GOTCHA: notas_credito is an immutable ledger table — the
+-- trigger trg_notas_credito_no_update (0006_ventas.sql:334) runs
+-- prevent_mutation() on every UPDATE and RAISEs "Los registros de
+-- notas_credito son inmutables". The one-time backfill UPDATE below is
+-- wrapped in DISABLE/ENABLE TRIGGER USER to bypass it (same pattern as
+-- 0023/0028). Runtime immutability is unaffected — the frontend INSERTs
+-- entry_point directly and never UPDATEs.
+--
 -- DEPLOY ORDER (manual, Supabase SQL Editor): apply BEFORE merging the
 -- frontend change to `main` — main triggers auto-deploy to Cloudflare
 -- Workers, and the new frontend code (Slice 1's INSERT) assumes the
@@ -66,9 +74,20 @@
 ALTER TABLE notas_credito
   ADD COLUMN IF NOT EXISTS entry_point TEXT;
 
+-- Backfill de filas existentes. notas_credito es INMUTABLE: el trigger
+-- trg_notas_credito_no_update (0006_ventas.sql:334) ejecuta prevent_mutation()
+-- en cada UPDATE y aborta el backfill. Se deshabilitan los triggers USER
+-- temporalmente SOLO para poblar la nueva columna, mismo patron que
+-- 0023/0028 para movimientos_cuenta(_proveedor). El INSERT del frontend
+-- (que ya trae entry_point) nunca pasa por este UPDATE, asi que la
+-- inmutabilidad en runtime queda intacta.
+ALTER TABLE notas_credito DISABLE TRIGGER USER;
+
 UPDATE notas_credito
   SET entry_point = CASE WHEN sesion_caja_id IS NOT NULL THEN 'POS' ELSE 'TRADICIONAL' END
   WHERE entry_point IS NULL;
+
+ALTER TABLE notas_credito ENABLE TRIGGER USER;
 
 ALTER TABLE notas_credito
   ALTER COLUMN entry_point SET DEFAULT 'TRADICIONAL';
