@@ -15,6 +15,7 @@ import { AuditModal } from './audit-modal'
 import { CxcModal } from './cxc-modal'
 import { CuadreMetodoModal } from './cuadre-metodo-modal'
 import { CuadreTotalesFiscales } from './cuadre-totales-fiscales'
+import { CuadreNotasCredito } from './cuadre-notas-credito'
 import { CuadreConteoFisico } from './cuadre-conteo-fisico'
 import { CuadreDetallePagos } from './cuadre-detalle-pagos'
 import { CuadreDetalleFacturas } from './cuadre-detalle-facturas'
@@ -839,6 +840,14 @@ export function CuadrePage({ initialFecha, initialCajaId, initialSesionId }: Cua
                 resetKey={detallePagosResetKey}
               />
             </div>
+          </div>
+
+          {/* Notas de Credito — reintegros por metodo + contado/credito split (Slice 5) */}
+          <div className="space-y-3">
+            <h2 className="text-sm font-semibold text-muted-foreground uppercase tracking-wide px-1">
+              Notas de Credito
+            </h2>
+            <CuadreNotasCredito filters={activeFilters} />
           </div>
 
           {/* Cobranzas CxC ingresadas a caja */}

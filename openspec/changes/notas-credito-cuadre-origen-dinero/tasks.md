@@ -110,17 +110,17 @@ Only the tracker merges to `develop` (opened draft/no-merge from the start). Eac
 
 **DEFERRED to the NEXT change (the "cuadre avanzado / alerta cajero" change already mapped)**: the fine-grained cross-session matrix — deciding per-egreso whether it "affects cash flow / only shows the NC / registers an outflow in another cashier's session / affects nothing", based on (a) original-invoice session alive vs closed, (b) money-session same-or-different from invoice-session, (c) treasury-vs-session origin. PLUS the cashier alert ("your cash flow was affected by another session's invoice"). The DATA BASES for this are already fully persisted per-egreso (obs #2956: table-of-egreso + `sesion_caja_id` + `doc_origen_id` → reconstructible via `NC → venta → sesion_caja_id` + `sesiones_caja.status`), so the future change is pure read/UX logic on top — no schema or write-path change needed. This split keeps QA of the money engine isolated from the temporal cross-session flow logic.
 
-- [ ] 5.1 RED: new test harness for `use-cuadre.ts` (zero existing tests) — reuse the mock pattern from `use-notas-credito.test.ts:118+`. New `__tests__` dir.
-- [ ] 5.2 RED: `useTotalesFiscales` NC total moves from date-scoped to session-scoped via `buildCuadreWhere(filters, empresaId)` on `notas_credito`.
-- [ ] 5.3 RED: `useReintegrosPorMetodo(filters)` — `movimientos_metodo_cobro` JOIN `metodos_cobro` JOIN `notas_credito ON doc_origen_id` WHERE `origen='NCR'`, session-scoped, GROUP BY método, surfaces `nro_ncr`.
-- [ ] 5.4 RED: `useNotasCreditoDeSesion(filters)` — `notas_credito` scoped by `buildCuadreWhere` JOIN `ventas` for contado/crédito split.
-- [ ] 5.5 GREEN: implement `useTotalesFiscales` change — passes 5.2.
-- [ ] 5.6 GREEN: implement `useReintegrosPorMetodo` — passes 5.3.
-- [ ] 5.7 GREEN: implement `useNotasCreditoDeSesion` — passes 5.4.
-- [ ] 5.8 GREEN: create `cuadre-notas-credito.tsx` rendering 5.6+5.7 as sibling sections; add RTL rendering test.
-- [ ] 5.9 Regression test: `useSaldoEfectivoBimonetario` nets correctly once Slice 3's real `sesion_caja_id`/`metodos_cobro.saldo_actual` writes land — no code change needed there. Do NOT touch `usePagosPorMetodo` (stays untouched).
-- [ ] 5.10 NEW — multi-source regression: one NC's array mixing `SESION_EFECTIVO`+`BANCO` produces >1 row in `useReintegrosPorMetodo` output, both sharing the same `nro_ncr` via `doc_origen_id` — assert GROUP BY already handles it (design.md's "no code change needed" claim), coverage only.
-- [ ] 5.11 Verify green. Push `ncr-cuadre-05-cuadre`, open PR #5 → base `04-selector-guard`.
+- [x] 5.1 RED: new test harness for `use-cuadre.ts` (zero existing tests) — reuse the mock pattern from `use-notas-credito.test.ts:118+`. New `__tests__` dir.
+- [x] 5.2 RED: `useTotalesFiscales` NC total moves from date-scoped to session-scoped via `buildCuadreWhere(filters, empresaId)` on `notas_credito`.
+- [x] 5.3 RED: `useReintegrosPorMetodo(filters)` — `movimientos_metodo_cobro` JOIN `metodos_cobro` JOIN `notas_credito ON doc_origen_id` WHERE `origen='NCR'`, session-scoped, GROUP BY método, surfaces `nro_ncr`.
+- [x] 5.4 RED: `useNotasCreditoDeSesion(filters)` — `notas_credito` scoped by `buildCuadreWhere` JOIN `ventas` for contado/crédito split.
+- [x] 5.5 GREEN: implement `useTotalesFiscales` change — passes 5.2.
+- [x] 5.6 GREEN: implement `useReintegrosPorMetodo` — passes 5.3.
+- [x] 5.7 GREEN: implement `useNotasCreditoDeSesion` — passes 5.4.
+- [x] 5.8 GREEN: create `cuadre-notas-credito.tsx` rendering 5.6+5.7 as sibling sections; add RTL rendering test.
+- [x] 5.9 Regression test: `useSaldoEfectivoBimonetario` nets correctly once Slice 3's real `sesion_caja_id`/`metodos_cobro.saldo_actual` writes land — no code change needed there. Do NOT touch `usePagosPorMetodo` (stays untouched).
+- [x] 5.10 NEW — multi-source regression: one NC's array mixing `SESION_EFECTIVO`+`BANCO` produces >1 row in `useReintegrosPorMetodo` output, both sharing the same `nro_ncr` via `doc_origen_id` — assert GROUP BY already handles it (design.md's "no code change needed" claim), coverage only. **Deviation**: implemented as 2 `SESION_EFECTIVO` targets (2 different `metodos_cobro` rows) sharing one `nro_ncr` — `useReintegrosPorMetodo`'s scope (task 5.3) is `movimientos_metodo_cobro` only; `BANCO` egresos land in `movimientos_bancarios`, a different table with its own reconciliation (design.md: "each account's own cuadre picks up exactly its slice"), so a literal SESION_EFECTIVO+BANCO row-pair can never appear in THIS hook's result set. The GROUP-BY-handles-multi-row claim is still proven byte-for-byte for the in-scope table.
+- [x] 5.11 Verify green. NOT pushed — executor scope is local-only, no push/PR/merge per instructions (same as Slices 1-4).
 
 ## Phase 6: Badge (Slice 6) — unchanged
 

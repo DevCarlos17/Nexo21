@@ -473,6 +473,81 @@ export function usePagosPorMetodo(filters: CuadreFilters | null) {
   return { metodos, isLoading: isLoading || extraLoading || aperturaLoading }
 }
 
+// ─── Reintegros de Notas de Credito por Metodo (Slice 5) ───
+
+/**
+ * Reintegros en efectivo de sesion (`SESION_EFECTIVO`) generados por notas de
+ * credito (Design §"Cuadre Integration" efecto #2). Lee `movimientos_metodo_cobro`
+ * con `origen='NCR'` (el unico valor que el write core de `crearNotaCredito`
+ * usa para este origen, obs #2956) y hace JOIN a `notas_credito` via
+ * `doc_origen_id` para surfacar `nro_ncr` (trazabilidad).
+ *
+ * Alcance BASE (Slice 5, ver tasks.md Phase 5 SCOPE BOUNDARY): solo la porcion
+ * de `SESION_EFECTIVO` — tesoreria (`mov_caja_fuerte`) y banco
+ * (`movimientos_bancarios`) tienen su PROPIO cuadre/conciliacion (design.md:
+ * "each account's own cuadre picks up exactly its slice via existing
+ * filters"), no se tocan aqui.
+ *
+ * `total_usd` no viene precomputado (obs #2949: `movimientos_metodo_cobro` NO
+ * tiene columna `monto_usd`, solo `pagos` la tiene) — se reconstruye para
+ * metodos en Bs dividiendo por `notas_credito.tasa_historica`, la MISMA tasa
+ * (`venta.tasa`, fotografia bimonetaria) usada por el write core al calcular
+ * `montoUsd = bsToUsd(montoNativo, venta.tasa)`.
+ */
+export interface ReintegroNcrItem {
+  metodoCobroId: string
+  metodoNombre: string
+  moneda: string
+  totalUsd: number
+  totalOriginal: number
+  nroNcr: string
+}
+
+export function useReintegrosPorMetodo(filters: CuadreFilters | null) {
+  const { user } = useCurrentUser()
+  const empresaId = user?.empresa_id ?? ''
+  const [where, params] = useMemo(
+    () => filters ? buildMovsWhere(filters, empresaId, 'mmc') : ['1=0', [] as unknown[]],
+    [filters, empresaId]
+  )
+
+  const { data, isLoading } = useQuery(
+    filters
+      ? `SELECT
+           mc.id as metodo_cobro_id,
+           mc.nombre as metodo_nombre,
+           CASE WHEN mon.codigo_iso = 'VES' THEN 'BS' ELSE COALESCE(mon.codigo_iso, 'USD') END as moneda,
+           COALESCE(SUM(
+             CASE WHEN mon.codigo_iso = 'VES'
+               THEN CAST(mmc.monto AS REAL) / NULLIF(CAST(nc.tasa_historica AS REAL), 0)
+               ELSE CAST(mmc.monto AS REAL)
+             END
+           ), 0) as total_usd,
+           COALESCE(SUM(CAST(mmc.monto AS REAL)), 0) as total_original,
+           nc.nro_ncr as nro_ncr
+         FROM movimientos_metodo_cobro mmc
+         JOIN metodos_cobro mc ON mmc.metodo_cobro_id = mc.id
+         LEFT JOIN monedas mon ON mc.moneda_id = mon.id
+         JOIN notas_credito nc ON mmc.doc_origen_id = nc.id
+         WHERE ${where} AND mmc.origen = 'NCR' AND nc.empresa_id = ?
+         GROUP BY mc.id, nc.nro_ncr
+         ORDER BY nc.nro_ncr, mc.nombre`
+      : '',
+    filters ? [...params, empresaId] : []
+  )
+
+  const reintegros: ReintegroNcrItem[] = (data ?? []).map((row: Record<string, unknown>) => ({
+    metodoCobroId: String(row.metodo_cobro_id ?? ''),
+    metodoNombre: String(row.metodo_nombre ?? ''),
+    moneda: String(row.moneda ?? 'USD'),
+    totalUsd: Number(Number(row.total_usd ?? 0).toFixed(2)),
+    totalOriginal: Number(Number(row.total_original ?? 0).toFixed(2)),
+    nroNcr: String(row.nro_ncr ?? ''),
+  }))
+
+  return { reintegros, isLoading }
+}
+
 // ─── Top Productos ─────────────────────────────────────────
 
 export function useTopProductos(filters: CuadreFilters | null, limit = 15) {
@@ -1133,16 +1208,20 @@ export function useTotalesFiscales(filters: CuadreFilters | null) {
     total_financiero_bs: number
   }
 
-  // NCR del mismo dia/sesion — usando fecha y empresa_id
+  // NCR de la sesion — session-scoped via buildCuadreWhere (Slice 5, task
+  // 5.2/5.5: notas_credito.sesion_caja_id ya existe desde Slice 1, antes esta
+  // query solo filtraba por fecha+empresa_id e ignoraba la sesion elegida).
+  const [whereNcr, paramsNcr] = useMemo(
+    () => filters ? buildCuadreWhere(filters, empresaId) : ['1=0', [] as unknown[]],
+    [filters, empresaId]
+  )
   const { data: dataNcr, isLoading: loadingNcr } = useQuery(
-    filters
-      ? `SELECT
-           COALESCE(SUM(CAST(total_usd AS REAL)), 0) as total_ncr,
-           COALESCE(SUM(CAST(total_bs AS REAL)), 0) as total_ncr_bs
-         FROM notas_credito
-         WHERE empresa_id = ? AND DATE(fecha, 'localtime') = ?`
-      : '',
-    filters ? [empresaId, filters.fecha] : []
+    `SELECT
+       COALESCE(SUM(CAST(total_usd AS REAL)), 0) as total_ncr,
+       COALESCE(SUM(CAST(total_bs AS REAL)), 0) as total_ncr_bs
+     FROM notas_credito
+     WHERE ${whereNcr}`,
+    paramsNcr
   )
 
   const ncrRow = (dataNcr?.[0] ?? {}) as { total_ncr: number; total_ncr_bs: number }
@@ -1170,6 +1249,71 @@ export function useTotalesFiscales(filters: CuadreFilters | null) {
     } as TotalesFiscales,
     isLoading: loadingVentas || loadingNcr,
   }
+}
+
+// ─── Notas de Credito de la Sesion (Slice 5) ────────────────
+
+/**
+ * Lista de notas de credito de la sesion/fecha filtrada (Design §"Cuadre
+ * Integration" efecto #3: "keyed on issuance session, not affected by the
+ * array"). JOIN a `ventas` para surfacar `tipo_venta` (CONTADO/CREDITO) —
+ * el tipo ORIGINAL de la factura anulada/reversada, para que la UI arme el
+ * split contado/credito (task 5.4/5.7).
+ */
+export interface NotaCreditoSesionItem {
+  id: string
+  nroNcr: string
+  ventaId: string
+  tipo: string
+  totalUsd: number
+  totalBs: number
+  fecha: string
+  nroFactura: string
+  tipoVenta: string
+  clienteNombre: string
+}
+
+export function useNotasCreditoDeSesion(filters: CuadreFilters | null) {
+  const { user } = useCurrentUser()
+  const empresaId = user?.empresa_id ?? ''
+  const [where, params] = useMemo(
+    () => filters ? buildCuadreWhere(filters, empresaId, 'nc') : ['1=0', [] as unknown[]],
+    [filters, empresaId]
+  )
+
+  const { data, isLoading } = useQuery(
+    filters
+      ? `SELECT
+           nc.id, nc.nro_ncr, nc.venta_id, nc.tipo,
+           CAST(nc.total_usd AS REAL) as total_usd,
+           CAST(nc.total_bs AS REAL) as total_bs,
+           nc.fecha,
+           v.nro_factura,
+           v.tipo as tipo_venta,
+           c.nombre as cliente_nombre
+         FROM notas_credito nc
+         JOIN ventas v ON nc.venta_id = v.id
+         JOIN clientes c ON v.cliente_id = c.id
+         WHERE ${where}
+         ORDER BY nc.fecha DESC`
+      : '',
+    filters ? params : []
+  )
+
+  const notas: NotaCreditoSesionItem[] = (data ?? []).map((row: Record<string, unknown>) => ({
+    id: String(row.id ?? ''),
+    nroNcr: String(row.nro_ncr ?? ''),
+    ventaId: String(row.venta_id ?? ''),
+    tipo: String(row.tipo ?? ''),
+    totalUsd: Number(Number(row.total_usd ?? 0).toFixed(2)),
+    totalBs: Number(Number(row.total_bs ?? 0).toFixed(2)),
+    fecha: String(row.fecha ?? ''),
+    nroFactura: String(row.nro_factura ?? ''),
+    tipoVenta: String(row.tipo_venta ?? ''),
+    clienteNombre: String(row.cliente_nombre ?? ''),
+  }))
+
+  return { notas, isLoading }
 }
 
 // ─── IVA por Alicuota ──────────────────────────────────────
