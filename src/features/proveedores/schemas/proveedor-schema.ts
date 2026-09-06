@@ -7,7 +7,7 @@ export const proveedorSchema = z.object({
     .string()
     .min(3, 'Minimo 3 caracteres')
     .transform(sanitizeRif)
-    .refine(isValidRif, 'RIF invalido. Formato: J001234567 (10 caracteres). Verificar digito.'),
+    .refine(isValidRif, 'RIF invalido. Formato: letra (V/E/J/G/C/P) + 9 digitos, ej: J001234567.'),
   nombre_comercial: z.string().optional().default(''),
   direccion_fiscal: z.string().optional().default(''),
   ciudad: z.string().optional().default(''),

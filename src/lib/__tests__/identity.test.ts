@@ -110,13 +110,14 @@ describe('isValidRif', () => {
     expect(isValidRif(rif)).toBe(true)
   })
 
-  it('invalida RIF con digito verificador incorrecto', () => {
-    // Tomamos un RIF valido y cambiamos su ultimo digito
+  it('acepta RIF con cualquier ultimo digito (validacion Modulo 11 desactivada)', () => {
+    // Con la validacion del digito verificador desactivada, cualquier
+    // letra permitida + 9 digitos es valida sin importar el ultimo digito.
     const base = 'J00123456'
     const check = calcRifCheckDigit(base + '0')
     const wrongCheck = (check + 1) % 10
     const rif = base + wrongCheck.toString()
-    expect(isValidRif(rif)).toBe(false)
+    expect(isValidRif(rif)).toBe(true)
   })
 
   it('invalida RIF con formato incorrecto', () => {
