@@ -6,6 +6,9 @@ import { useDetalleFactura, usePagosFactura } from '@/features/cxc/hooks/use-cxc
 import { useCompany } from '@/features/configuracion/hooks/use-company'
 import { useCurrentUser } from '@/core/hooks/use-current-user'
 import { useDepositosVentaActivos, type Deposito } from '@/features/inventario/hooks/use-depositos'
+import { useMetodosPagoActivos } from '@/features/configuracion/hooks/use-payment-methods'
+import { useCuentasTesoreria } from '@/features/tesoreria/hooks/use-cuentas-tesoreria'
+import { useSesionesActivasDashboard } from '@/features/caja/hooks/use-sesiones-caja'
 import { toast } from 'sonner'
 
 /**
@@ -35,6 +38,9 @@ vi.mock('@/features/cxc/hooks/use-cxc', () => ({
 vi.mock('@/features/configuracion/hooks/use-company', () => ({ useCompany: vi.fn() }))
 vi.mock('@/core/hooks/use-current-user', () => ({ useCurrentUser: vi.fn() }))
 vi.mock('@/features/inventario/hooks/use-depositos', () => ({ useDepositosVentaActivos: vi.fn() }))
+vi.mock('@/features/configuracion/hooks/use-payment-methods', () => ({ useMetodosPagoActivos: vi.fn() }))
+vi.mock('@/features/tesoreria/hooks/use-cuentas-tesoreria', () => ({ useCuentasTesoreria: vi.fn() }))
+vi.mock('@/features/caja/hooks/use-sesiones-caja', () => ({ useSesionesActivasDashboard: vi.fn() }))
 vi.mock('sonner', () => ({ toast: { success: vi.fn(), error: vi.fn() } }))
 
 const mockedCrearNotaCredito = vi.mocked(crearNotaCredito)
@@ -45,6 +51,9 @@ const mockedUseCompany = vi.mocked(useCompany)
 const mockedUseCurrentUser = vi.mocked(useCurrentUser)
 const mockedUseDepositosVentaActivos = vi.mocked(useDepositosVentaActivos)
 const mockedToastSuccess = vi.mocked(toast.success)
+const mockedUseMetodosPagoActivos = vi.mocked(useMetodosPagoActivos)
+const mockedUseCuentasTesoreria = vi.mocked(useCuentasTesoreria)
+const mockedUseSesionesActivasDashboard = vi.mocked(useSesionesActivasDashboard)
 
 function baseFactura(overrides: Partial<FacturaParaAnular> = {}): FacturaParaAnular {
   return {
@@ -103,6 +112,43 @@ function setup() {
   })
   mockedUseDepositosVentaActivos.mockReturnValue({ depositos: baseDepositos(), isLoading: false })
   mockedCrearNotaCredito.mockResolvedValue({ ncrId: 'ncr-1', nroNcr: 'NCR-000001' })
+  mockedUseMetodosPagoActivos.mockReturnValue({
+    metodos: [
+      { id: 'metodo-usd-1', nombre: 'Efectivo USD', tipo: 'EFECTIVO', moneda_id: 'mon-usd', moneda: 'USD', banco_empresa_id: null, banco_nombre: null, caja_fuerte_id: null, caja_nombre: null, requiere_referencia: 0, saldo_actual: '500.00', is_active: 1, empresa_id: 'emp-1', created_at: '2026-01-01', deposito_directo: 0, comision_pct: '0', usa_pos: 1, usa_cxc: 0, usa_cxp: 0, consolidar_lotes: 0 },
+      { id: 'metodo-bs-1', nombre: 'Efectivo Bs', tipo: 'EFECTIVO', moneda_id: 'mon-bs', moneda: 'BS', banco_empresa_id: null, banco_nombre: null, caja_fuerte_id: null, caja_nombre: null, requiere_referencia: 0, saldo_actual: '20000.00', is_active: 1, empresa_id: 'emp-1', created_at: '2026-01-01', deposito_directo: 0, comision_pct: '0', usa_pos: 1, usa_cxc: 0, usa_cxp: 0, consolidar_lotes: 0 },
+    ] as never,
+    isLoading: false,
+  })
+  mockedUseCuentasTesoreria.mockReturnValue({
+    cuentas: [
+      { id: 'caja-1', tipo: 'CAJA_FUERTE', nombre: 'Caja Fuerte Principal', moneda_id: 'mon-usd', moneda_codigo: 'USD', moneda_simbolo: '$', saldo_actual: '1000.00', is_active: true, detalle: {} as never },
+      { id: 'banco-1', tipo: 'BANCO', nombre: 'Banesco', moneda_id: 'mon-bs', moneda_codigo: 'VES', moneda_simbolo: 'Bs', saldo_actual: '50000.00', is_active: true, detalle: {} as never },
+    ],
+    bancos: [],
+    cajas: [],
+    isLoading: false,
+  })
+  mockedUseSesionesActivasDashboard.mockReturnValue({
+    sesiones: [
+      { id: 'sesion-a', empresa_id: 'emp-1', caja_id: 'caja-a', caja_nombre: 'Caja 1', cajera_nombre: 'Maria', fecha_apertura: '2026-01-01T00:00:00Z', monto_apertura_usd: '0', monto_apertura_bs: '0', saldoUsd: 0, saldoBs: 0, totalFacturas: 0, totalFacturadoUsd: 0, totalArticulos: 0, horasTranscurridas: 1, factHora: 0, itemsHora: 0, atv: 0, upt: 0, score: 100 },
+    ] as never,
+    isLoading: false,
+    soloUna: true,
+  } as never)
+}
+
+/**
+ * Slice 4 (notas-credito-cuadre-origen-dinero): "Devolver dinero" ahora
+ * exige llenar el picker multi-origen antes de poder confirmar. Helper
+ * compartido — cubre exactamente el remanente de `baseFactura()`
+ * (`total_usd: '10.00'`, `saldo_pend_usd: '0.00'`).
+ */
+async function llenarOrigenDineroValido(user: ReturnType<typeof userEvent.setup>) {
+  await user.click(screen.getByRole('button', { name: /Agregar origen/i }))
+  await user.selectOptions(screen.getByLabelText('Tipo de origen'), 'SESION_EFECTIVO')
+  await user.selectOptions(screen.getByLabelText('Cuenta'), 'metodo-usd-1')
+  await user.type(screen.getByRole('spinbutton'), '10')
+  await user.selectOptions(screen.getByLabelText(/sesion destino/i), 'sesion-a')
 }
 
 describe('CrearNcrModal (ruta administrativa, Slice D) — sin PIN, reversa cualquier factura', () => {
@@ -197,21 +243,91 @@ describe('CrearNcrModal (ruta administrativa, Slice D) — sin PIN, reversa cual
     expect(mockedCrearNotaCredito.mock.calls[0][0]).not.toHaveProperty('sesionCajaActivaId')
   })
 
-  it('"Devolver dinero" esta deshabilitada, muestra indicacion de "Proximamente" y nunca dispara crearNotaCredito', async () => {
+  it('Slice 4: "Devolver dinero" esta HABILITADA (ya no es un placeholder) — al elegirla se ofrece el picker multi-origen', async () => {
+    const user = userEvent.setup()
     render(<CrearNcrModal isOpen onClose={() => {}} factura={baseFactura()} />)
 
     const devolverDinero = screen.getByRole('button', { name: /Devolver dinero/i })
-    expect(devolverDinero).toBeDisabled()
-    expect(screen.getByText(/Proximamente/i)).toBeInTheDocument()
+    expect(devolverDinero).toBeEnabled()
+    expect(screen.queryByText(/Proximamente/i)).not.toBeInTheDocument()
+
+    await user.click(devolverDinero)
+
+    expect(screen.getByRole('button', { name: /Agregar origen/i })).toBeInTheDocument()
     expect(mockedCrearNotaCredito).not.toHaveBeenCalled()
   })
 
-  it('"Credito a favor" es la unica opcion seleccionable y esta activa por defecto', () => {
+  it('Slice 4: "Devolver dinero" sin completar el picker bloquea "Confirmar Anulacion"', async () => {
+    const user = userEvent.setup()
+    render(<CrearNcrModal isOpen onClose={() => {}} factura={baseFactura()} />)
+
+    await user.click(screen.getByRole('button', { name: /Devolver dinero/i }))
+
+    expect(screen.getByRole('button', { name: /Confirmar Anulacion/i })).toBeDisabled()
+  })
+
+  it('Slice 4: completar el picker + elegir sesion destino habilita el submit y emite modalidad EFECTIVO_REAL con origenDinero y sesionDestinoId', async () => {
+    const user = userEvent.setup()
+    render(<CrearNcrModal isOpen onClose={() => {}} factura={baseFactura()} />)
+
+    await user.click(screen.getByRole('button', { name: /Devolver dinero/i }))
+    await llenarOrigenDineroValido(user)
+
+    expect(screen.getByRole('button', { name: /Confirmar Anulacion/i })).not.toBeDisabled()
+    await user.click(screen.getByRole('button', { name: /Confirmar Anulacion/i }))
+
+    await waitFor(() => expect(mockedCrearNotaCredito).toHaveBeenCalledTimes(1))
+    expect(mockedCrearNotaCredito.mock.calls[0][0]).toMatchObject({
+      entryPoint: 'TRADICIONAL',
+      modalidad: 'EFECTIVO_REAL',
+      sesionDestinoId: 'sesion-a',
+      origenDinero: [{ tipo: 'SESION_EFECTIVO', cuentaId: 'metodo-usd-1', monto: '10' }],
+    })
+  })
+
+  it('Slice 4: el selector de sesion destino ofrece TODAS las sesiones activas de la empresa (empresa-wide, Decision 4/5)', async () => {
+    const user = userEvent.setup()
+    mockedUseSesionesActivasDashboard.mockReturnValue({
+      sesiones: [
+        { id: 'sesion-a', empresa_id: 'emp-1', caja_id: 'caja-a', caja_nombre: 'Caja 1', cajera_nombre: 'Maria', fecha_apertura: '2026-01-01T00:00:00Z', monto_apertura_usd: '0', monto_apertura_bs: '0', saldoUsd: 0, saldoBs: 0, totalFacturas: 0, totalFacturadoUsd: 0, totalArticulos: 0, horasTranscurridas: 1, factHora: 0, itemsHora: 0, atv: 0, upt: 0, score: 100 },
+        { id: 'sesion-b', empresa_id: 'emp-1', caja_id: 'caja-b', caja_nombre: 'Caja 2', cajera_nombre: 'Juan', fecha_apertura: '2026-01-01T00:00:00Z', monto_apertura_usd: '0', monto_apertura_bs: '0', saldoUsd: 0, saldoBs: 0, totalFacturas: 0, totalFacturadoUsd: 0, totalArticulos: 0, horasTranscurridas: 1, factHora: 0, itemsHora: 0, atv: 0, upt: 0, score: 100 },
+      ] as never,
+      isLoading: false,
+      soloUna: false,
+    } as never)
+    render(<CrearNcrModal isOpen onClose={() => {}} factura={baseFactura()} />)
+
+    await user.click(screen.getByRole('button', { name: /Devolver dinero/i }))
+    await user.click(screen.getByRole('button', { name: /Agregar origen/i }))
+    await user.selectOptions(screen.getByLabelText('Tipo de origen'), 'SESION_EFECTIVO')
+
+    expect(screen.getByRole('option', { name: /Caja 1.*Maria/i })).toBeInTheDocument()
+    expect(screen.getByRole('option', { name: /Caja 2.*Juan/i })).toBeInTheDocument()
+  })
+
+  it('Slice 4: elegir "Credito a favor" luego de haber elegido "Devolver dinero" oculta el picker y vuelve a AJUSTE_CXC', async () => {
+    const user = userEvent.setup()
+    render(<CrearNcrModal isOpen onClose={() => {}} factura={baseFactura()} />)
+
+    await user.click(screen.getByRole('button', { name: /Devolver dinero/i }))
+    expect(screen.getByRole('button', { name: /Agregar origen/i })).toBeInTheDocument()
+
+    await user.click(screen.getByRole('button', { name: /Credito a favor/i }))
+    expect(screen.queryByRole('button', { name: /Agregar origen/i })).not.toBeInTheDocument()
+
+    await user.click(screen.getByRole('button', { name: /Confirmar Anulacion/i }))
+    await waitFor(() => expect(mockedCrearNotaCredito).toHaveBeenCalledTimes(1))
+    expect(mockedCrearNotaCredito.mock.calls[0][0].modalidad).toBe('AJUSTE_CXC')
+  })
+
+  it('Slice 4 (FLIP — antes "Credito a favor" era la unica opcion seleccionable, "Devolver dinero" era un shell deshabilitado): ambas opciones estan habilitadas, "Credito a favor" sigue siendo el default activo', () => {
     render(<CrearNcrModal isOpen onClose={() => {}} factura={baseFactura()} />)
 
     const creditoAFavor = screen.getByRole('button', { name: /Credito a favor/i })
+    const devolverDinero = screen.getByRole('button', { name: /Devolver dinero/i })
     expect(creditoAFavor).toBeEnabled()
     expect(creditoAFavor).toHaveAttribute('aria-pressed', 'true')
+    expect(devolverDinero).toBeEnabled()
   })
 
   it('emision siempre resulta en modalidad AJUSTE_CXC sin importar el estado del selector', async () => {

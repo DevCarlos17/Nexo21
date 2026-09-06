@@ -8,6 +8,8 @@ import { useCompany } from '@/features/configuracion/hooks/use-company'
 import { useCurrentUser } from '@/core/hooks/use-current-user'
 import { usePermissions } from '@/core/hooks/use-permissions'
 import { useDepositosVentaActivos } from '@/features/inventario/hooks/use-depositos'
+import { useMetodosPagoActivos } from '@/features/configuracion/hooks/use-payment-methods'
+import { useCuentasTesoreria } from '@/features/tesoreria/hooks/use-cuentas-tesoreria'
 import { toast } from 'sonner'
 import type { FacturaParaAnular } from '../../hooks/use-notas-credito'
 import type { SesionCaja } from '@/features/caja/hooks/use-sesiones-caja'
@@ -63,6 +65,8 @@ vi.mock('@/core/hooks/use-permissions', async (importOriginal) => {
   return { ...actual, usePermissions: vi.fn() }
 })
 vi.mock('@/features/inventario/hooks/use-depositos', () => ({ useDepositosVentaActivos: vi.fn() }))
+vi.mock('@/features/configuracion/hooks/use-payment-methods', () => ({ useMetodosPagoActivos: vi.fn() }))
+vi.mock('@/features/tesoreria/hooks/use-cuentas-tesoreria', () => ({ useCuentasTesoreria: vi.fn() }))
 vi.mock('sonner', () => ({ toast: { success: vi.fn(), error: vi.fn(), info: vi.fn() } }))
 
 const mockedCrearNotaCredito = vi.mocked(crearNotaCredito)
@@ -77,6 +81,8 @@ const mockedUsePermissions = vi.mocked(usePermissions)
 const mockedUseDepositosVentaActivos = vi.mocked(useDepositosVentaActivos)
 const mockedToastSuccess = vi.mocked(toast.success)
 const mockedToastInfo = vi.mocked(toast.info)
+const mockedUseMetodosPagoActivos = vi.mocked(useMetodosPagoActivos)
+const mockedUseCuentasTesoreria = vi.mocked(useCuentasTesoreria)
 
 function depositoActivo(overrides: Partial<Deposito> = {}): Deposito {
   return {
@@ -159,12 +165,44 @@ function setup(opts: { hasPermission: boolean }) {
   })
   mockedCrearNotaCredito.mockResolvedValue({ ncrId: 'ncr-1', nroNcr: 'NCR-000001' })
   mockedUseDepositosVentaActivos.mockReturnValue({ depositos: [depositoActivo()], isLoading: false })
+  mockedUseMetodosPagoActivos.mockReturnValue({
+    metodos: [
+      { id: 'metodo-usd-1', nombre: 'Efectivo USD', tipo: 'EFECTIVO', moneda_id: 'mon-usd', moneda: 'USD', banco_empresa_id: null, banco_nombre: null, caja_fuerte_id: null, caja_nombre: null, requiere_referencia: 0, saldo_actual: '500.00', is_active: 1, empresa_id: 'emp-1', created_at: '2026-01-01', deposito_directo: 0, comision_pct: '0', usa_pos: 1, usa_cxc: 0, usa_cxp: 0, consolidar_lotes: 0 },
+      { id: 'metodo-bs-1', nombre: 'Efectivo Bs', tipo: 'EFECTIVO', moneda_id: 'mon-bs', moneda: 'BS', banco_empresa_id: null, banco_nombre: null, caja_fuerte_id: null, caja_nombre: null, requiere_referencia: 0, saldo_actual: '20000.00', is_active: 1, empresa_id: 'emp-1', created_at: '2026-01-01', deposito_directo: 0, comision_pct: '0', usa_pos: 1, usa_cxc: 0, usa_cxp: 0, consolidar_lotes: 0 },
+    ] as never,
+    isLoading: false,
+  })
+  mockedUseCuentasTesoreria.mockReturnValue({
+    cuentas: [
+      { id: 'caja-1', tipo: 'CAJA_FUERTE', nombre: 'Caja Fuerte Principal', moneda_id: 'mon-usd', moneda_codigo: 'USD', moneda_simbolo: '$', saldo_actual: '1000.00', is_active: true, detalle: {} as never },
+      { id: 'banco-1', tipo: 'BANCO', nombre: 'Banesco', moneda_id: 'mon-bs', moneda_codigo: 'VES', moneda_simbolo: 'Bs', saldo_actual: '50000.00', is_active: true, detalle: {} as never },
+    ],
+    bancos: [],
+    cajas: [],
+    isLoading: false,
+  })
 }
 
 async function seleccionarPrimeraFactura() {
   const user = userEvent.setup()
   await user.click(screen.getByText(/C01-000001/i))
   return user
+}
+
+/**
+ * Slice 4: EFECTIVO_REAL + TOTAL ahora exige un origen de dinero explicito
+ * (picker multi-cuenta) en vez del stub automatico pre-Slice-4 (que siempre
+ * armaba `{cuentaId: sesion.id, monto: factura.total_usd}` en silencio).
+ * Helper compartido por los tests que solo necesitan "un origen valido
+ * cualquiera" para poder confirmar — cubre exactamente el remanente de
+ * `facturaSesion()` (`total_usd: '30.00'`) con la cuenta mockeada
+ * `metodo-usd-1` ("Efectivo USD", saldo 500.00, ver `setup()`).
+ */
+async function llenarOrigenDineroValido(user: ReturnType<typeof userEvent.setup>) {
+  await user.click(screen.getByRole('button', { name: /Agregar origen/i }))
+  await user.selectOptions(screen.getByLabelText('Tipo de origen'), 'SESION_EFECTIVO')
+  await user.selectOptions(screen.getByLabelText('Cuenta'), 'metodo-usd-1')
+  await user.type(screen.getByRole('spinbutton'), '30')
 }
 
 describe('NotaCreditoPosModal — Slice 5a-2a (entrada POS, PIN A, TOTAL only, sin coupling con cobro)', () => {
@@ -185,6 +223,7 @@ describe('NotaCreditoPosModal — Slice 5a-2a (entrada POS, PIN A, TOTAL only, s
     render(<NotaCreditoPosModal isOpen onClose={() => {}} sesion={sesionActiva} />)
 
     const user = await seleccionarPrimeraFactura()
+    await llenarOrigenDineroValido(user)
     await user.click(screen.getByRole('button', { name: /Confirmar Anulacion/i }))
 
     await waitFor(() => expect(mockedCrearNotaCredito).toHaveBeenCalledTimes(1))
@@ -203,6 +242,7 @@ describe('NotaCreditoPosModal — Slice 5a-2a (entrada POS, PIN A, TOTAL only, s
     render(<NotaCreditoPosModal isOpen onClose={() => {}} sesion={sesionActiva} />)
 
     const user = await seleccionarPrimeraFactura()
+    await llenarOrigenDineroValido(user)
     await user.click(screen.getByRole('button', { name: /Confirmar Anulacion/i }))
 
     expect(screen.getByTestId('mock-pin-dialog')).toBeInTheDocument()
@@ -218,6 +258,7 @@ describe('NotaCreditoPosModal — Slice 5a-2a (entrada POS, PIN A, TOTAL only, s
     render(<NotaCreditoPosModal isOpen onClose={() => {}} sesion={sesionActiva} />)
 
     const user = await seleccionarPrimeraFactura()
+    await llenarOrigenDineroValido(user)
     await user.click(screen.getByRole('button', { name: /Confirmar Anulacion/i }))
 
     await waitFor(() => expect(mockedCrearNotaCredito).toHaveBeenCalledTimes(1))
@@ -248,6 +289,7 @@ describe('NotaCreditoPosModal — Slice 5a-2a (entrada POS, PIN A, TOTAL only, s
     render(<NotaCreditoPosModal isOpen onClose={() => {}} sesion={sesionActiva} />)
 
     const user = await seleccionarPrimeraFactura()
+    await llenarOrigenDineroValido(user)
     await user.click(screen.getByRole('button', { name: /Confirmar Anulacion/i }))
 
     await waitFor(() => expect(mockedCrearNotaCredito).toHaveBeenCalledTimes(1))
@@ -294,6 +336,7 @@ describe('NotaCreditoPosModal — Slice 5a-2b (PIN B, override de deposito, SEPA
     const selects = screen.getAllByRole('combobox')
     const depositoSelect = selects[selects.length - 1]
     await user.selectOptions(depositoSelect, 'dep-1')
+    await llenarOrigenDineroValido(user)
     await user.click(screen.getByRole('button', { name: /Confirmar Anulacion/i }))
 
     await waitFor(() => expect(mockedCrearNotaCredito).toHaveBeenCalledTimes(1))
@@ -363,6 +406,7 @@ describe('NotaCreditoPosModal — Slice 5a-2b (PIN B, override de deposito, SEPA
 
     const selects = screen.getAllByRole('combobox')
     await user.selectOptions(selects[selects.length - 1], 'dep-1')
+    await llenarOrigenDineroValido(user)
 
     // Confirmar todavia exige PIN A (emision) — es una autorizacion separada.
     await user.click(screen.getByRole('button', { name: /Confirmar Anulacion/i }))
@@ -380,6 +424,11 @@ describe('NotaCreditoPosModal — Slice 5a-2b (PIN B, override de deposito, SEPA
     render(<NotaCreditoPosModal isOpen onClose={() => {}} sesion={sesionActiva} />)
 
     const user = await seleccionarPrimeraFactura()
+    // Slice 4: el origen de dinero se llena PRIMERO — de otro modo el boton
+    // queda `disabled` por `origenDineroInvalido` y el click ni siquiera
+    // abre el PIN A, lo que rompe el escenario que este test quiere probar
+    // (el gate de `depositoInvalido` especificamente).
+    await llenarOrigenDineroValido(user)
 
     // Sin autorizar PIN B todavia, el riel es automatico -> depositoInvalido
     // es false y "Confirmar Anulacion" esta habilitado. Sin permiso de
@@ -434,6 +483,7 @@ describe('NotaCreditoPosModal — Slice 5e UX C (deposito de reingreso no puede 
     render(<NotaCreditoPosModal isOpen onClose={() => {}} sesion={sesionActiva} />)
 
     const user = await seleccionarPrimeraFactura()
+    await llenarOrigenDineroValido(user)
     await user.click(screen.getByRole('button', { name: /Cambiar deposito/i }))
     await user.click(screen.getByText('Autorizar'))
 
@@ -451,7 +501,12 @@ describe('NotaCreditoPosModal — Slice 5e UX C (deposito de reingreso no puede 
     setup({ hasPermission: true })
     render(<NotaCreditoPosModal isOpen onClose={() => {}} sesion={sesionActiva} />)
 
-    await seleccionarPrimeraFactura()
+    const user = await seleccionarPrimeraFactura()
+    // Slice 4: el picker de origen de dinero tiene su PROPIO gate
+    // (`origenDineroInvalido`) independiente del de deposito — se llena
+    // aqui para aislar la asercion de este test (que el deposito, en su
+    // riel automatico, nunca bloquea).
+    await llenarOrigenDineroValido(user)
 
     expect(screen.getByRole('button', { name: /Confirmar Anulacion/i })).not.toBeDisabled()
     expect(screen.queryByText(/Debes seleccionar el deposito de reingreso/i)).not.toBeInTheDocument()
@@ -968,6 +1023,7 @@ describe('NotaCreditoPosModal — Slice 3b (eleccion TOTAL/PARCIAL, wiring compl
     render(<NotaCreditoPosModal isOpen onClose={() => {}} sesion={sesionActiva} />)
 
     const user = await seleccionarPrimeraFactura()
+    await llenarOrigenDineroValido(user)
     await user.click(screen.getByRole('button', { name: /Confirmar Anulacion/i }))
 
     await waitFor(() => expect(mockedCrearNotaCredito).toHaveBeenCalledTimes(1))
@@ -1016,6 +1072,7 @@ describe('NotaCreditoPosModal — Slice 4 (placeholder "Editar metodos de pago" 
     render(<NotaCreditoPosModal isOpen onClose={() => {}} sesion={sesionActiva} />)
 
     const user = await seleccionarPrimeraFactura()
+    await llenarOrigenDineroValido(user)
 
     await user.click(screen.getByRole('button', { name: /Editar metodos de pago/i }))
     expect(screen.getByTestId('mock-pin-dialog')).toBeInTheDocument()
@@ -1053,6 +1110,7 @@ describe('NotaCreditoPosModal — Slice 5g.5 (behavior F: el modal permanece abi
     render(<NotaCreditoPosModal isOpen onClose={onClose} sesion={sesionActiva} />)
 
     const user = await seleccionarPrimeraFactura()
+    await llenarOrigenDineroValido(user)
     await user.click(screen.getByRole('button', { name: /Confirmar Anulacion/i }))
 
     await waitFor(() => expect(mockedCrearNotaCredito).toHaveBeenCalledTimes(1))
@@ -1091,6 +1149,7 @@ describe('NotaCreditoPosModal — Slice 5g.5 (behavior F: el modal permanece abi
     render(<NotaCreditoPosModal isOpen onClose={() => {}} sesion={sesionActiva} />)
 
     const user = await seleccionarPrimeraFactura()
+    await llenarOrigenDineroValido(user)
     await user.click(screen.getByRole('button', { name: /Cambiar deposito/i }))
     await user.click(screen.getByText('Autorizar'))
     const selects = screen.getAllByRole('combobox')
@@ -1101,5 +1160,111 @@ describe('NotaCreditoPosModal — Slice 5g.5 (behavior F: el modal permanece abi
     await waitFor(() => expect(mockedCrearNotaCredito).toHaveBeenCalledTimes(1))
 
     expect(screen.getByText(/Automatico/i)).toBeInTheDocument()
+  })
+})
+
+describe('NotaCreditoPosModal — Slice 4 (selector multi-origen real, reemplaza el stub cuentaId=sesion.id)', () => {
+  beforeEach(() => {
+    vi.clearAllMocks()
+  })
+
+  it('EFECTIVO_REAL + TOTAL: muestra el picker multi-origen ("Agregar origen") y bloquea "Confirmar Anulacion" hasta elegir un origen valido', async () => {
+    setup({ hasPermission: true })
+    render(<NotaCreditoPosModal isOpen onClose={() => {}} sesion={sesionActiva} />)
+
+    await seleccionarPrimeraFactura()
+
+    expect(screen.getByRole('button', { name: /Agregar origen/i })).toBeInTheDocument()
+    expect(screen.getByRole('button', { name: /Confirmar Anulacion/i })).toBeDisabled()
+  })
+
+  it('elegir sesion+monto valido en el picker habilita el submit y emite origenDinero con el metodos_cobro.id real (NO sesion.id, corrige el stub)', async () => {
+    setup({ hasPermission: true })
+    render(<NotaCreditoPosModal isOpen onClose={() => {}} sesion={sesionActiva} />)
+
+    const user = await seleccionarPrimeraFactura()
+    await user.click(screen.getByRole('button', { name: /Agregar origen/i }))
+    const tipoSelect = screen.getByLabelText('Tipo de origen')
+    await user.selectOptions(tipoSelect, 'SESION_EFECTIVO')
+    await user.selectOptions(screen.getByLabelText('Cuenta'), 'metodo-usd-1')
+    await user.type(screen.getByRole('spinbutton'), '30')
+
+    expect(screen.getByRole('button', { name: /Confirmar Anulacion/i })).not.toBeDisabled()
+    await user.click(screen.getByRole('button', { name: /Confirmar Anulacion/i }))
+
+    await waitFor(() => expect(mockedCrearNotaCredito).toHaveBeenCalledTimes(1))
+    expect(mockedCrearNotaCredito.mock.calls[0][0]).toMatchObject({
+      entryPoint: 'POS',
+      sesionCajaActivaId: 'sesion-1',
+      modalidad: 'EFECTIVO_REAL',
+      origenDinero: [{ tipo: 'SESION_EFECTIVO', cuentaId: 'metodo-usd-1', monto: '30' }],
+    })
+  })
+
+  it('el picker POS NUNCA renderiza un selector de sesion destino (carril protegido, Decision 4) — siempre usa la sesion activa propia', async () => {
+    setup({ hasPermission: true })
+    render(<NotaCreditoPosModal isOpen onClose={() => {}} sesion={sesionActiva} />)
+
+    const user = await seleccionarPrimeraFactura()
+    await user.click(screen.getByRole('button', { name: /Agregar origen/i }))
+    await user.selectOptions(screen.getByLabelText('Tipo de origen'), 'SESION_EFECTIVO')
+
+    expect(screen.queryByText(/sesion destino/i)).not.toBeInTheDocument()
+  })
+
+  it('las opciones de "Efectivo de sesion" son SOLO los metodos_cobro efectivo de la empresa (Efectivo USD/Bs), no otros metodos', async () => {
+    setup({ hasPermission: true })
+    render(<NotaCreditoPosModal isOpen onClose={() => {}} sesion={sesionActiva} />)
+
+    const user = await seleccionarPrimeraFactura()
+    await user.click(screen.getByRole('button', { name: /Agregar origen/i }))
+    await user.selectOptions(screen.getByLabelText('Tipo de origen'), 'SESION_EFECTIVO')
+
+    expect(screen.getByRole('option', { name: /Efectivo USD/i })).toBeInTheDocument()
+    expect(screen.getByRole('option', { name: /Efectivo Bs/i })).toBeInTheDocument()
+  })
+
+  it('las opciones de Tesoreria/Banco vienen de useCuentasTesoreria (caja fuerte + banco), libres para POS', async () => {
+    setup({ hasPermission: true })
+    render(<NotaCreditoPosModal isOpen onClose={() => {}} sesion={sesionActiva} />)
+
+    const user = await seleccionarPrimeraFactura()
+    await user.click(screen.getByRole('button', { name: /Agregar origen/i }))
+    await user.selectOptions(screen.getByLabelText('Tipo de origen'), 'TESORERIA_EFECTIVO')
+    expect(screen.getByRole('option', { name: /Caja Fuerte Principal/i })).toBeInTheDocument()
+
+    await user.selectOptions(screen.getByLabelText('Tipo de origen'), 'BANCO')
+    expect(screen.getByRole('option', { name: /Banesco/i })).toBeInTheDocument()
+  })
+
+  it('modalidad SALDO_FAVOR (no-desembolso): NUNCA muestra el picker de origen de dinero', async () => {
+    setup({ hasPermission: true })
+    render(<NotaCreditoPosModal isOpen onClose={() => {}} sesion={sesionActiva} />)
+
+    const user = await seleccionarPrimeraFactura()
+    await user.selectOptions(screen.getByRole('combobox'), 'SALDO_FAVOR')
+
+    expect(screen.queryByRole('button', { name: /Agregar origen/i })).not.toBeInTheDocument()
+  })
+
+  it('cambiar a tipo PARCIAL retira "Efectivo / tarjeta" de las modalidades ofrecidas (combinacion cash+PARCIAL no soportada aun, evita reintegro fantasma)', async () => {
+    setup({ hasPermission: true })
+    mockedUseDetalleFactura.mockReturnValue({
+      detalle: [
+        {
+          id: 'vd-1', venta_id: 'venta-1', producto_id: 'p1', cantidad: '5',
+          precio_unitario_usd: '10.00', subtotal_usd: '50.00', subtotal_bs: '2000.00',
+          producto_nombre: 'Botox 50U', producto_codigo: 'P001',
+          tipo_impuesto: 'Gravable', impuesto_pct: '16', es_decimal: 0, precio_unitario_bs: '400.00',
+        },
+      ],
+      isLoading: false,
+    })
+    render(<NotaCreditoPosModal isOpen onClose={() => {}} sesion={sesionActiva} />)
+
+    const user = await seleccionarPrimeraFactura()
+    await user.click(screen.getByRole('button', { name: 'Parcial' }))
+
+    expect(screen.queryByRole('option', { name: /Efectivo \/ tarjeta/i })).not.toBeInTheDocument()
   })
 })

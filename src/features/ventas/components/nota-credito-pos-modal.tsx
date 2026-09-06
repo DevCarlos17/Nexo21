@@ -1,4 +1,5 @@
 import { useState, useRef, useEffect, useMemo } from 'react'
+import Decimal from 'decimal.js'
 import { X, Warning, MagnifyingGlass } from '@phosphor-icons/react'
 import { formatUsd, formatBs, formatTasa } from '@/lib/currency'
 import { formatDateTime } from '@/lib/format'
@@ -31,9 +32,16 @@ import { useCompany } from '@/features/configuracion/hooks/use-company'
 import { useCurrentUser } from '@/core/hooks/use-current-user'
 import { usePermissions, PERMISSIONS } from '@/core/hooks/use-permissions'
 import { useDepositosVentaActivos } from '@/features/inventario/hooks/use-depositos'
+import { useMetodosPagoActivos } from '@/features/configuracion/hooks/use-payment-methods'
+import { useCuentasTesoreria } from '@/features/tesoreria/hooks/use-cuentas-tesoreria'
 import { SupervisorPinDialog } from '@/components/ui/supervisor-pin-dialog'
 import { NativeSelect } from '@/components/ui/native-select'
 import { Badge } from '@/components/ui/badge'
+import { OrigenDineroPicker, type OrigenDineroPickerResultado } from './origen-dinero-picker'
+import {
+  type CuentaOrigenDineroOption,
+  normalizarMonedaOrigen,
+} from '../utils/origen-dinero-picker'
 import { toast } from 'sonner'
 import type { SesionCaja } from '@/features/caja/hooks/use-sesiones-caja'
 
@@ -60,6 +68,21 @@ const MODALIDADES_POS: { value: LiquidacionModalidad; label: string }[] = [
   { value: 'AJUSTE_CXC', label: 'Ajuste de cuentas por cobrar' },
   { value: 'COMPENSACION_VENTA', label: 'Compensar con una venta nueva' },
 ]
+
+/**
+ * Slice 4 (multi-origin picker UI): el reintegro real de efectivo (write-core
+ * de `crearNotaCredito`, paso 6c) solo esta cableado para `tipoNc==='TOTAL'`
+ * — la combinacion `PARCIAL` + `EFECTIVO_REAL` no fue disenada aun (deferida
+ * a Slice 5a, ver comentario en `use-notas-credito.ts` linea ~1018) y hoy
+ * enrutaria el dinero elegido en el picker COMPLETO a credito a favor (SAFC)
+ * en silencio, sin devolverlo — un "reintegro fantasma" que engañaria al
+ * cajero. Se retira `EFECTIVO_REAL` de las modalidades ofrecidas cuando
+ * `tipoNc==='PARCIAL'` para no exponer una combinacion que el backend no
+ * soporta todavia.
+ */
+function modalidadesParaTipoNc(tipoNc: 'TOTAL' | 'PARCIAL') {
+  return tipoNc === 'PARCIAL' ? MODALIDADES_POS.filter((m) => m.value !== 'EFECTIVO_REAL') : MODALIDADES_POS
+}
 
 /**
  * F2 QA fix (Slice 5c, parche visual pendiente de rediseno futuro): cada
@@ -141,6 +164,47 @@ export function NotaCreditoPosModal({ isOpen, onClose, sesion }: NotaCreditoPosM
   // listado (ver mas abajo).
   const { badgesPorVenta } = useBadgesReversoSesion(user?.empresa_id ?? '', sesion?.id ?? '')
 
+  // Slice 4 (multi-origin picker UI, Design §Decision 5): cuentas reales
+  // seleccionables por el picker de origen de dinero. `SESION_EFECTIVO` se
+  // restringe a los `metodos_cobro` tipo EFECTIVO de la empresa (mismo
+  // lookup que `ingreso-retiro-modal.tsx:63-64` — "Efectivo USD"/"Efectivo
+  // Bs"), NUNCA a la sesion como cuenta (esa reinterpretacion es exactamente
+  // lo que Decision 5 exige y el stub pre-Slice-4 todavia no hacia).
+  // Tesoreria/Banco se reusan de `useCuentasTesoreria` (Tesoreria feature) —
+  // sin duplicar la query.
+  const { metodos: metodosPago } = useMetodosPagoActivos()
+  const { cuentas: cuentasTesoreriaRaw } = useCuentasTesoreria()
+  const cuentasSesionOrigen: CuentaOrigenDineroOption[] = metodosPago
+    .filter((m) => m.tipo === 'EFECTIVO')
+    .map((m) => ({
+      tipo: 'SESION_EFECTIVO' as const,
+      cuentaId: m.id,
+      label: m.nombre,
+      moneda: m.moneda === 'BS' ? 'BS' : 'USD',
+      saldoActual: m.saldo_actual,
+    }))
+  const cuentasTesoreriaOrigen: CuentaOrigenDineroOption[] = cuentasTesoreriaRaw
+    .filter((c) => c.tipo === 'CAJA_FUERTE')
+    .map((c) => ({
+      tipo: 'TESORERIA_EFECTIVO' as const,
+      cuentaId: c.id,
+      label: c.nombre,
+      moneda: normalizarMonedaOrigen(c.moneda_codigo),
+      saldoActual: c.saldo_actual,
+    }))
+  const cuentasBancoOrigen: CuentaOrigenDineroOption[] = cuentasTesoreriaRaw
+    .filter((c) => c.tipo === 'BANCO')
+    .map((c) => ({
+      tipo: 'BANCO' as const,
+      cuentaId: c.id,
+      label: c.nombre,
+      moneda: normalizarMonedaOrigen(c.moneda_codigo),
+      saldoActual: c.saldo_actual,
+    }))
+  const [origenDineroResultado, setOrigenDineroResultado] = useState<OrigenDineroPickerResultado | null>(
+    null
+  )
+
   const [facturaId, setFacturaId] = useState<string | null>(null)
   const [searchQuery, setSearchQuery] = useState('')
   const [modalidad, setModalidad] = useState<LiquidacionModalidad>('EFECTIVO_REAL')
@@ -190,6 +254,7 @@ export function NotaCreditoPosModal({ isOpen, onClose, sesion }: NotaCreditoPosM
     setDepositoElegidoId(null)
     setAccionPendiente(null)
     setLineasParcialPendientes(null)
+    setOrigenDineroResultado(null)
   }
 
   useEffect(() => {
@@ -210,6 +275,15 @@ export function NotaCreditoPosModal({ isOpen, onClose, sesion }: NotaCreditoPosM
   function handleBackdropClick(e: React.MouseEvent<HTMLDialogElement>) {
     if (e.target === dialogRef.current) onClose()
   }
+
+  // Slice 4: PARCIAL nunca ofrece EFECTIVO_REAL (ver `modalidadesParaTipoNc`)
+  // — si el usuario cambia a PARCIAL con EFECTIVO_REAL ya elegido, cae a un
+  // default seguro no-desembolso en vez de quedar en un valor invalido.
+  useEffect(() => {
+    if (tipoNc === 'PARCIAL' && modalidad === 'EFECTIVO_REAL') {
+      setModalidad('SALDO_FAVOR')
+    }
+  }, [tipoNc, modalidad])
 
   const factura = facturas.find((f) => f.id === facturaId) ?? null
 
@@ -259,6 +333,17 @@ export function NotaCreditoPosModal({ isOpen, onClose, sesion }: NotaCreditoPosM
   // "Seleccionar deposito..." nunca puede quedar seleccionado al confirmar.
   // Sin autorizar PIN B (riel automatico por defecto) esto nunca bloquea.
   const depositoInvalido = pinDepositoAutorizado && !depositoElegidoId
+
+  // Slice 4: el picker de origen de dinero solo aplica a EFECTIVO_REAL +
+  // TOTAL (ver `modalidadesParaTipoNc` — PARCIAL nunca ofrece EFECTIVO_REAL).
+  // `remanenteUsd` espeja `remanenteALiquidar` del backend para TOTAL:
+  // `total_usd - saldo_pend_usd` (lo YA cubierto en la venta original no
+  // necesita reintegrarse, invariante `total_usd >= saldo_pend_usd`).
+  const mostrarOrigenDineroPicker = modalidad === 'EFECTIVO_REAL' && tipoNc === 'TOTAL'
+  const remanenteUsd = factura
+    ? Decimal.max(new Decimal(0), new Decimal(factura.total_usd).minus(factura.saldo_pend_usd)).toFixed(2)
+    : '0'
+  const origenDineroInvalido = mostrarOrigenDineroPicker && !(origenDineroResultado?.valido ?? false)
 
   const recibo: ReciboData | null = useMemo(() => {
     if (!factura) return null
@@ -342,29 +427,15 @@ export function NotaCreditoPosModal({ isOpen, onClose, sesion }: NotaCreditoPosM
         // de `validarOrigenDinero` rechaza si se envia igual). El
         // POS-express esta SIEMPRE restringido a su propia sesion activa
         // (carril protegido, Design §Decision 4) — nunca ofrece elegir
-        // otra cuenta.
-        // STUB (Slice 4, multi-origin picker UI — NO construido todavia):
-        // el array de una sola asignacion + `monto: factura.total_usd` es
-        // un mapeo MINIMO para mantener este caller compilando bajo el
-        // nuevo contrato array. Dos simplificaciones deliberadas, ambas
-        // deferidas a Slice 4:
-        // (a) `cuentaId: sesion.id` sigue siendo una sesion, NO el
-        //     `metodos_cobro.id` real de "Efectivo USD"/"Efectivo Bs" que
-        //     exige Decision 5 — el WRITE branch heredado (paso 6c, sin
-        //     cambios en este slice) tambien sigue tratandolo como sesion,
-        //     asi que el comportamiento observable es IDENTICO al objeto
-        //     unico pre-rework.
-        // (b) `monto` no se usa hoy por el WRITE branch (que sigue
-        //     reversando cada `pago.monto` original, no este campo) — solo
-        //     necesita ser > 0 para pasar la Rule 3 pura de
-        //     `validarOrigenDinero`. Slice 3a lo hara el dato real que se
-        //     escribe.
-        ...(modalidad === 'EFECTIVO_REAL'
-          ? {
-              origenDinero: [
-                { tipo: 'SESION_EFECTIVO' as const, cuentaId: sesion.id, monto: factura.total_usd },
-              ],
-            }
+        // otra cuenta (no hay selector de sesion en `OrigenDineroPicker`
+        // para POS, `mostrarSelectorSesion=false`).
+        // Slice 4: reemplaza el stub pre-existente — `origenDineroResultado`
+        // viene del picker multi-origen, ya resuelto contra `metodos_cobro`/
+        // `caja_fuerte`/`bancos_empresa` reales (Decision 5), nunca contra
+        // `sesion.id`. `handleConfirmarClick` ya garantiza que este objeto
+        // existe y es valido antes de permitir llegar aqui.
+        ...(mostrarOrigenDineroPicker && origenDineroResultado
+          ? { origenDinero: origenDineroResultado.origenDinero }
           : {}),
         ...(lineasParcial ? { tipo: 'PARCIAL' as const, lineas: lineasParcial } : {}),
         // PIN B (Slice 5a-2b): `resolverDepositoOverride` retorna `null`
@@ -405,6 +476,10 @@ export function NotaCreditoPosModal({ isOpen, onClose, sesion }: NotaCreditoPosM
     // cuando falta elegir deposito, este guard cubre cualquier disparo
     // programatico del handler.
     if (depositoInvalido) return
+    // Slice 4: mismo patron de defensa en profundidad — el boton ya viene
+    // `disabled` mientras el picker de origen de dinero no sea valido
+    // (EFECTIVO_REAL + TOTAL).
+    if (origenDineroInvalido) return
     // PIN A (Spec notas-credito-pos, obs #2835 regla definitiva): solo se
     // pide PIN cuando el usuario actual NO tiene el permiso de emision de
     // NC — con permiso, emite directo, sin friccion.
@@ -631,7 +706,7 @@ export function NotaCreditoPosModal({ isOpen, onClose, sesion }: NotaCreditoPosM
                         onChange={(e) => setModalidad(e.target.value as LiquidacionModalidad)}
                         className="text-sm"
                       >
-                        {MODALIDADES_POS.map((m) => (
+                        {modalidadesParaTipoNc(tipoNc).map((m) => (
                           <option key={m.value} value={m.value}>{m.label}</option>
                         ))}
                       </NativeSelect>
@@ -641,6 +716,24 @@ export function NotaCreditoPosModal({ isOpen, onClose, sesion }: NotaCreditoPosM
                         </p>
                       )}
                     </div>
+
+                    {mostrarOrigenDineroPicker && (
+                      <div className="rounded-lg border p-3">
+                        <p className="text-xs font-semibold text-muted-foreground mb-2">
+                          Origen del reintegro
+                        </p>
+                        <OrigenDineroPicker
+                          remanenteUsd={remanenteUsd}
+                          tasa={factura.tasa}
+                          cuentasSesion={cuentasSesionOrigen}
+                          cuentasTesoreria={cuentasTesoreriaOrigen}
+                          cuentasBanco={cuentasBancoOrigen}
+                          mostrarSelectorSesion={false}
+                          sesionesDisponibles={[]}
+                          onChange={setOrigenDineroResultado}
+                        />
+                      </div>
+                    )}
 
                     <div className="rounded-lg border p-3">
                       <p className="text-xs font-semibold text-muted-foreground mb-2">
@@ -753,7 +846,7 @@ export function NotaCreditoPosModal({ isOpen, onClose, sesion }: NotaCreditoPosM
               {puedeEmitirNc && tipoNc === 'TOTAL' && (
                 <button
                   onClick={handleConfirmarClick}
-                  disabled={loading || depositoInvalido}
+                  disabled={loading || depositoInvalido || origenDineroInvalido}
                   className="px-4 py-2 text-sm rounded-md bg-red-600 text-white hover:bg-red-700 transition-colors disabled:opacity-50"
                 >
                   {loading ? 'Procesando...' : 'Confirmar Anulacion'}
@@ -780,6 +873,8 @@ export function NotaCreditoPosModal({ isOpen, onClose, sesion }: NotaCreditoPosM
             // es async, el PIN B (deposito) puede autorizarse SIN elegir
             // deposito mientras PIN A todavia esta pendiente.
             if (depositoInvalido) return
+            // Slice 4: mismo criterio para el picker de origen de dinero.
+            if (origenDineroInvalido) return
             void emitirNc(lineasParcialPendientes ?? undefined)
           }
         }}

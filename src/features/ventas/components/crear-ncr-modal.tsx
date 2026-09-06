@@ -1,4 +1,5 @@
 import { useState, useRef, useEffect, useMemo } from 'react'
+import Decimal from 'decimal.js'
 import { X, Warning } from '@phosphor-icons/react'
 import {
   crearNotaCredito,
@@ -16,10 +17,18 @@ import {
 import { buildReciboData, type ReciboData, type TipoImpuestoLinea } from '../utils/factura-export'
 import { FacturaDetallePanel } from './factura-detalle-panel'
 import { SeleccionLineasNc, type LineaSeleccionNc } from './seleccion-lineas-nc'
+import { OrigenDineroPicker, type OrigenDineroPickerResultado } from './origen-dinero-picker'
+import {
+  type CuentaOrigenDineroOption,
+  normalizarMonedaOrigen,
+} from '../utils/origen-dinero-picker'
 import { useDetalleFactura, usePagosFactura } from '@/features/cxc/hooks/use-cxc'
 import { useCompany } from '@/features/configuracion/hooks/use-company'
 import { useCurrentUser } from '@/core/hooks/use-current-user'
 import { useDepositosVentaActivos } from '@/features/inventario/hooks/use-depositos'
+import { useMetodosPagoActivos } from '@/features/configuracion/hooks/use-payment-methods'
+import { useCuentasTesoreria } from '@/features/tesoreria/hooks/use-cuentas-tesoreria'
+import { useSesionesActivasDashboard } from '@/features/caja/hooks/use-sesiones-caja'
 import { NativeSelect } from '@/components/ui/native-select'
 import { toast } from 'sonner'
 
@@ -66,6 +75,52 @@ export function CrearNcrModal({ isOpen, onClose, factura }: CrearNcrModalProps) 
   const { user } = useCurrentUser()
   const { depositos: depositosActivos } = useDepositosVentaActivos()
 
+  // Slice 4 (multi-origin picker UI, Design §Decision 5): mismas cuentas
+  // reales que `nota-credito-pos-modal.tsx` — SESION_EFECTIVO restringido a
+  // los `metodos_cobro` tipo EFECTIVO de la empresa (nunca a la sesion como
+  // cuenta); Tesoreria/Banco via `useCuentasTesoreria` (sin duplicar la
+  // query). La ruta TRADICIONAL es empresa-wide (Decision 4): ademas ofrece
+  // el selector de sesion destino via `useSesionesActivasDashboard` (ya
+  // filtra `status='ABIERTA'` — una sesion CERRADA nunca aparece aqui,
+  // cumpliendo el pre-check UX del task 4.5 por construccion).
+  const { metodos: metodosPago } = useMetodosPagoActivos()
+  const { cuentas: cuentasTesoreriaRaw } = useCuentasTesoreria()
+  const { sesiones: sesionesActivas } = useSesionesActivasDashboard()
+  const cuentasSesionOrigen: CuentaOrigenDineroOption[] = metodosPago
+    .filter((m) => m.tipo === 'EFECTIVO')
+    .map((m) => ({
+      tipo: 'SESION_EFECTIVO' as const,
+      cuentaId: m.id,
+      label: m.nombre,
+      moneda: m.moneda === 'BS' ? 'BS' : 'USD',
+      saldoActual: m.saldo_actual,
+    }))
+  const cuentasTesoreriaOrigen: CuentaOrigenDineroOption[] = cuentasTesoreriaRaw
+    .filter((c) => c.tipo === 'CAJA_FUERTE')
+    .map((c) => ({
+      tipo: 'TESORERIA_EFECTIVO' as const,
+      cuentaId: c.id,
+      label: c.nombre,
+      moneda: normalizarMonedaOrigen(c.moneda_codigo),
+      saldoActual: c.saldo_actual,
+    }))
+  const cuentasBancoOrigen: CuentaOrigenDineroOption[] = cuentasTesoreriaRaw
+    .filter((c) => c.tipo === 'BANCO')
+    .map((c) => ({
+      tipo: 'BANCO' as const,
+      cuentaId: c.id,
+      label: c.nombre,
+      moneda: normalizarMonedaOrigen(c.moneda_codigo),
+      saldoActual: c.saldo_actual,
+    }))
+  const sesionesDestinoOpciones = sesionesActivas.map((s) => ({
+    id: s.id,
+    label: `${s.caja_nombre ?? 'Caja'} — ${s.cajera_nombre ?? 'Sin cajera'}`,
+  }))
+  const [origenDineroResultado, setOrigenDineroResultado] = useState<OrigenDineroPickerResultado | null>(
+    null
+  )
+
   const [motivo, setMotivo] = useState('Anulacion total de factura')
   const [loading, setLoading] = useState(false)
   const [depositoElegidoId, setDepositoElegidoId] = useState<string | null>(null)
@@ -85,6 +140,7 @@ export function CrearNcrModal({ isOpen, onClose, factura }: CrearNcrModalProps) 
       setDepositoElegidoId(null)
       setTipoNc('TOTAL')
       setOrigenReverso('CREDITO_A_FAVOR')
+      setOrigenDineroResultado(null)
     } else {
       dialogRef.current?.close()
     }
@@ -117,6 +173,27 @@ export function CrearNcrModal({ isOpen, onClose, factura }: CrearNcrModalProps) 
   useEffect(() => {
     if (!puedeTotal && tipoNc === 'TOTAL') setTipoNc('PARCIAL')
   }, [puedeTotal, tipoNc])
+
+  // Slice 4: "Devolver dinero" solo aplica a TOTAL (ver comentario en
+  // `emitirNc`) — si el usuario cae en PARCIAL con "Devolver dinero" ya
+  // elegido, vuelve al default seguro "Credito a favor" (mismo criterio que
+  // `nota-credito-pos-modal.tsx` retira EFECTIVO_REAL de sus modalidades).
+  useEffect(() => {
+    if (tipoNc === 'PARCIAL' && origenReverso === 'DEVOLVER_DINERO') {
+      setOrigenReverso('CREDITO_A_FAVOR')
+    }
+  }, [tipoNc, origenReverso])
+
+  // Slice 4: el picker de origen de dinero solo aplica a "Devolver dinero" +
+  // TOTAL — igual que POS, el write-core de `crearNotaCredito` (paso 6c)
+  // solo esta cableado para `tipoNc==='TOTAL'` (PARCIAL sigue usando
+  // AJUSTE_CXC sin cambios, ver `emitirNc`). `remanenteUsd` espeja
+  // `remanenteALiquidar` del backend: `total_usd - saldo_pend_usd`.
+  const mostrarOrigenDineroPicker = origenReverso === 'DEVOLVER_DINERO' && tipoNc === 'TOTAL'
+  const remanenteUsd = factura
+    ? Decimal.max(new Decimal(0), new Decimal(factura.total_usd).minus(factura.saldo_pend_usd)).toFixed(2)
+    : '0'
+  const origenDineroInvalido = mostrarOrigenDineroPicker && !(origenDineroResultado?.valido ?? false)
 
   const recibo: ReciboData | null = useMemo(() => {
     if (!factura) return null
@@ -169,6 +246,14 @@ export function CrearNcrModal({ isOpen, onClose, factura }: CrearNcrModalProps) 
 
   async function emitirNc(lineasParcial?: LineaNcSeleccionada[]) {
     if (!factura || !user?.empresa_id) return
+    // Slice 4: "Devolver dinero" solo mueve dinero real cuando aplica a
+    // TOTAL (ver `mostrarOrigenDineroPicker`) — para PARCIAL (`lineasParcial`
+    // presente) siempre cae a AJUSTE_CXC sin cambios (movesCash+PARCIAL no
+    // esta cableado en el backend, ver comentario en `use-notas-credito.ts`
+    // linea ~1018; combinarlo aqui enrutaria el dinero elegido en el picker
+    // COMPLETO a credito a favor en silencio, mismo riesgo documentado en
+    // `nota-credito-pos-modal.tsx`).
+    const dispararDesembolso = !lineasParcial && mostrarOrigenDineroPicker && origenDineroResultado
     setLoading(true)
     try {
       const result = await crearNotaCredito({
@@ -180,10 +265,19 @@ export function CrearNcrModal({ isOpen, onClose, factura }: CrearNcrModalProps) 
         // la sesion de caja activa (factura potencialmente historica, ni idea
         // de que sesion este abierta ahora). Ver Regla de Oro, obs #2804.
         entryPoint: 'TRADICIONAL',
-        // Design §Decision 5: el selector "Devolver dinero"/"Credito a favor"
-        // es un placeholder — `origenReverso` NUNCA alimenta este valor,
-        // siempre AJUSTE_CXC sin importar el estado del selector.
-        modalidad: 'AJUSTE_CXC',
+        // Slice 4 (FLIP — Design §Decision 5): "Devolver dinero" ya NO es un
+        // placeholder — dispara la modalidad EFECTIVO_REAL real, con el
+        // array `origenDinero` resuelto por el picker multi-cuenta y la
+        // `sesionDestinoId` elegida (empresa-wide, Decision 4). "Credito a
+        // favor" (default) sigue siendo AJUSTE_CXC, comportamiento
+        // preservado byte-a-byte.
+        modalidad: dispararDesembolso ? 'EFECTIVO_REAL' : 'AJUSTE_CXC',
+        ...(dispararDesembolso
+          ? {
+              origenDinero: origenDineroResultado.origenDinero,
+              sesionDestinoId: origenDineroResultado.sesionDestinoId,
+            }
+          : {}),
         tipo: lineasParcial ? 'PARCIAL' : 'TOTAL',
         ...(lineasParcial ? { lineas: lineasParcial } : {}),
         depositoReingresoId: depositoElegidoId ?? undefined,
@@ -272,15 +366,22 @@ export function CrearNcrModal({ isOpen, onClose, factura }: CrearNcrModalProps) 
                   )}
                 </div>
 
-                {/* Origen del reverso — placeholder (Design §Decision 5). */}
+                {/* Origen del reverso (Slice 4, FLIP — Design §Decision 5): "Devolver
+                    dinero" ya NO es un shell deshabilitado, dispara el picker
+                    multi-origen debajo. Solo disponible para TOTAL (ver
+                    `mostrarOrigenDineroPicker`). */}
                 <div className="rounded-lg border p-3">
                   <p className="text-xs font-semibold text-muted-foreground mb-2">Origen del reverso</p>
                   <div className="flex gap-2">
                     <button
                       type="button"
-                      disabled
-                      title="Proximamente"
-                      className="flex-1 px-3 py-1.5 text-sm rounded-md border opacity-50 cursor-not-allowed"
+                      onClick={() => setOrigenReverso('DEVOLVER_DINERO')}
+                      disabled={tipoNc === 'PARCIAL'}
+                      aria-pressed={origenReverso === 'DEVOLVER_DINERO'}
+                      title={tipoNc === 'PARCIAL' ? 'Disponible solo para reverso Total' : undefined}
+                      className={`flex-1 px-3 py-1.5 text-sm rounded-md border transition-colors disabled:opacity-50 disabled:cursor-not-allowed ${
+                        origenReverso === 'DEVOLVER_DINERO' ? 'border-primary bg-muted font-medium' : 'hover:bg-muted'
+                      }`}
                     >
                       Devolver dinero
                     </button>
@@ -288,15 +389,32 @@ export function CrearNcrModal({ isOpen, onClose, factura }: CrearNcrModalProps) 
                       type="button"
                       onClick={() => setOrigenReverso('CREDITO_A_FAVOR')}
                       aria-pressed={origenReverso === 'CREDITO_A_FAVOR'}
-                      className="flex-1 px-3 py-1.5 text-sm rounded-md border border-primary bg-muted font-medium"
+                      className={`flex-1 px-3 py-1.5 text-sm rounded-md border transition-colors ${
+                        origenReverso === 'CREDITO_A_FAVOR' ? 'border-primary bg-muted font-medium' : 'hover:bg-muted'
+                      }`}
                     >
                       Credito a favor
                     </button>
                   </div>
-                  <p className="text-xs text-muted-foreground mt-1.5">
-                    "Devolver dinero" estara disponible en una entrega futura (Proximamente).
-                  </p>
                 </div>
+
+                {mostrarOrigenDineroPicker && (
+                  <div className="rounded-lg border p-3">
+                    <p className="text-xs font-semibold text-muted-foreground mb-2">
+                      Origen del reintegro
+                    </p>
+                    <OrigenDineroPicker
+                      remanenteUsd={remanenteUsd}
+                      tasa={factura.tasa}
+                      cuentasSesion={cuentasSesionOrigen}
+                      cuentasTesoreria={cuentasTesoreriaOrigen}
+                      cuentasBanco={cuentasBancoOrigen}
+                      mostrarSelectorSesion
+                      sesionesDisponibles={sesionesDestinoOpciones}
+                      onChange={setOrigenDineroResultado}
+                    />
+                  </div>
+                )}
 
                 {/* Deposito de reingreso — libre, SIN PIN (obs #2835, la
                     pantalla Tradicional dedicada ya esta protegida a nivel de
@@ -373,7 +491,7 @@ export function CrearNcrModal({ isOpen, onClose, factura }: CrearNcrModalProps) 
             {puedeEmitirNc && tipoNc === 'TOTAL' && (
               <button
                 onClick={() => void emitirNc()}
-                disabled={loading || !motivo.trim()}
+                disabled={loading || !motivo.trim() || origenDineroInvalido}
                 className="px-4 py-2 text-sm rounded-md bg-red-600 text-white hover:bg-red-700 transition-colors disabled:opacity-50"
               >
                 {loading ? 'Procesando...' : 'Confirmar Anulacion'}
