@@ -131,74 +131,113 @@ export function assertGateAntiFraudeNoDesembolso(
 }
 
 /**
- * Cuenta especifica de donde sale el dinero cuando la modalidad MUEVE
- * efectivo/tarjeta (Slice 2, Design §origenDinero shape/decoupling).
- * Reemplaza el reuso implicito de `sesionCajaActivaId`: `modalidad` decide
- * la CATEGORIA (cajon de sesion vs. tesoreria/banco), `origenDinero` decide
- * la CUENTA especifica dentro de esa categoria. `TESORERIA_EFECTIVO`/`BANCO`
- * validan su shape desde este slice pero el WRITE branch (REFUND_TESORERIA)
- * recien se implementa en Slice 3.
+ * Una asignacion dentro del array `origenDinero` (Slice 2 REWORK, Design
+ * §Decision 5, obs #2948/#2949): una cuenta especifica de donde sale una
+ * PARTE del dinero a reintegrar. Un NC puede combinar VARIAS asignaciones
+ * de tipos distintos en un solo reintegro (owner's canonical example: Bs500
+ * de efectivo de sesion + Bs500 de tesoreria via banco, en UNA sola NC) —
+ * reemplaza el modelo pre-rework de una unica cuenta por NC.
+ *
+ * `monto` esta en la moneda NATIVA de la cuenta (espejo del patron de pago
+ * del POS, `use-ventas.ts:771-807` — la cuenta ES la moneda, sin selector
+ * de moneda aparte). Para `SESION_EFECTIVO`, `cuentaId` apunta a un
+ * `metodos_cobro.id` de tipo efectivo (Decision 5) — esa reinterpretacion
+ * (vs. una sesion) recien se materializa en el two-pass write de Slice 3a;
+ * el WRITE branch heredado de Slice 1/2 (paso 6c, sin cambios en este
+ * slice) sigue tratando la PRIMERA asignacion `SESION_EFECTIVO` del array
+ * como si `cuentaId` fuera una sesion, exactamente como el objeto unico
+ * pre-rework.
  */
 export interface OrigenDinero {
   tipo: 'SESION_EFECTIVO' | 'TESORERIA_EFECTIVO' | 'BANCO'
   cuentaId: string
+  monto: string
 }
 
 /**
- * Validacion pura (pre-tx, sin tocar la DB) de la relacion `modalidad` /
- * `origenDinero` / `entryPoint` (Slice 2, Design §origenDinero
- * shape/decoupling + §Decision 4 "asimetrica por ruta", obs #2938). Se
- * evalua junto a `assertGateAntiFraudeNoDesembolso`, ANTES de abrir la
- * transaccion — una llamada directa que bypasee la UI cae en el mismo
- * chequeo.
+ * Validacion pura (pre-tx, sin tocar la DB) del array `origenDinero` (Slice
+ * 2 REWORK, Design §Decision 5, obs #2948/#2949/#2938). Se evalua junto a
+ * `assertGateAntiFraudeNoDesembolso`, ANTES de abrir la transaccion — una
+ * llamada directa que bypasee la UI cae en el mismo chequeo.
  *
- * Reglas (en orden):
- * 1. `EFECTIVO_REAL` exige `origenDinero.tipo === 'SESION_EFECTIVO'`
- *    (incluye el caso `origenDinero` indefinido — el dinero real siempre
- *    necesita una cuenta explicita).
- * 2. `REFUND_TESORERIA` rechaza `origenDinero.tipo === 'SESION_EFECTIVO'`
- *    (el cajon de una sesion POS nunca financia un reintegro de tesoreria).
- * 3. Gate extension: ninguna modalidad SIN desembolso admite `origenDinero`
- *    definido (mismo espiritu que `assertGateAntiFraudeNoDesembolso`).
- * 4. Decision 4 (carril protegido): desde `entryPoint==='POS'`, si
- *    `origenDinero.tipo==='SESION_EFECTIVO'`, `origenDinero.cuentaId` DEBE
- *    ser la propia `sesionCajaActivaId` del cajero — no puede elegir el
- *    cajon de otra sesion. Desde `'TRADICIONAL'` esta restriccion NO aplica
- *    (carril flexible, empresa-wide: cualquier sesion activa).
+ * Reemplaza por completo las Rules 1/2 pre-rework (tipo de cuenta
+ * restringido POR modalidad: `EFECTIVO_REAL`⇒solo-sesion,
+ * `REFUND_TESORERIA`⇒solo-tesoreria) — un NC ahora puede mezclar
+ * libremente tipos de cuenta en un solo reintegro; que modalidad se eligio
+ * solo afecta el valor persistido de `liquidacion_modalidad` (auditoria).
+ *
+ * Reglas (design.md §Decision 5 "Validation rules", en orden):
+ * 1. Modalidad de DESEMBOLSO (`!esModalidadNoDesembolso`) exige un array
+ *    NO vacio (≥1 asignacion) — no se puede elegir una modalidad que mueve
+ *    dinero y no reintegrar nada.
+ * 2. Modalidad SIN desembolso exige array vacio/indefinido (gate
+ *    extension, mismo espiritu que `assertGateAntiFraudeNoDesembolso`).
+ * 3. Cada asignacion: `monto > 0` (Decimal) — nunca cero ni negativo.
+ * 4. Sin pares `(tipo, cuentaId)` duplicados en el array (defensivo, evita
+ *    doble-conteo de una misma cuenta).
+ * 5. `entryPoint==='POS'` + el array contiene `SESION_EFECTIVO` ⇒ la
+ *    sesion resuelta es SIEMPRE `sesionCajaActivaId` (no hay eleccion
+ *    per-asignacion, Decision 5) — validado aqui como
+ *    `sesionCajaActivaId` obligatorio (simetrico a la Rule 6). El array ya
+ *    NO restringe que TIPOS de cuenta puede usar POS (a diferencia de las
+ *    Rules 1/2 viejas) — puede combinar sesion+tesoreria+banco libremente.
+ * 6. `entryPoint==='TRADICIONAL'` + el array contiene `SESION_EFECTIVO` ⇒
+ *    `sesionDestinoId` es obligatorio (una sola sesion elegida por el
+ *    usuario, para TODA la NC — Decision 5 "simplificacion deliberada").
  */
 export function validarOrigenDinero(params: {
   modalidad: LiquidacionModalidad
   entryPoint: 'POS' | 'TRADICIONAL'
   sesionCajaActivaId?: string
-  origenDinero?: OrigenDinero
+  sesionDestinoId?: string
+  origenDinero?: OrigenDinero[]
 }): void {
-  const { modalidad, entryPoint, sesionCajaActivaId, origenDinero } = params
+  const { modalidad, entryPoint, sesionCajaActivaId, sesionDestinoId, origenDinero } = params
+  const asignaciones = origenDinero ?? []
+  const noDesembolso = esModalidadNoDesembolso(modalidad)
 
-  if (modalidad === 'EFECTIVO_REAL' && origenDinero?.tipo !== 'SESION_EFECTIVO') {
+  if (!noDesembolso && asignaciones.length === 0) {
     throw new Error(
-      `origenDinero invalido: la modalidad 'EFECTIVO_REAL' exige origenDinero.tipo === 'SESION_EFECTIVO'.`
+      `origenDinero invalido: la modalidad '${modalidad}' mueve dinero y exige al menos una asignacion (array no vacio) en origenDinero.`
     )
   }
 
-  if (modalidad === 'REFUND_TESORERIA' && origenDinero?.tipo === 'SESION_EFECTIVO') {
-    throw new Error(
-      `origenDinero invalido: la modalidad 'REFUND_TESORERIA' no admite origenDinero.tipo === 'SESION_EFECTIVO'.`
-    )
-  }
-
-  if (esModalidadNoDesembolso(modalidad) && origenDinero !== undefined) {
+  if (noDesembolso && asignaciones.length > 0) {
     throw new Error(
       `origenDinero invalido: la modalidad '${modalidad}' es no-desembolso y no admite origenDinero.`
     )
   }
 
-  if (
-    entryPoint === 'POS' &&
-    origenDinero?.tipo === 'SESION_EFECTIVO' &&
-    origenDinero.cuentaId !== sesionCajaActivaId
-  ) {
+  for (const asignacion of asignaciones) {
+    if (!new Decimal(asignacion.monto).gt(0)) {
+      throw new Error(
+        `origenDinero invalido: cada asignacion exige monto > 0 (recibido '${asignacion.monto}' para la cuenta '${asignacion.cuentaId}').`
+      )
+    }
+  }
+
+  const cuentasVistas = new Set<string>()
+  for (const asignacion of asignaciones) {
+    const clave = `${asignacion.tipo}::${asignacion.cuentaId}`
+    if (cuentasVistas.has(clave)) {
+      throw new Error(
+        `origenDinero invalido: la cuenta '${asignacion.cuentaId}' (${asignacion.tipo}) esta duplicada en el array.`
+      )
+    }
+    cuentasVistas.add(clave)
+  }
+
+  const tieneSesionEfectivo = asignaciones.some((a) => a.tipo === 'SESION_EFECTIVO')
+
+  if (entryPoint === 'POS' && tieneSesionEfectivo && !sesionCajaActivaId) {
     throw new Error(
-      `origenDinero invalido: desde el POS solo se puede usar el efectivo de la propia sesion activa (carril protegido, Design §Decision 4).`
+      `origenDinero invalido: desde el POS, una asignacion SESION_EFECTIVO exige sesionCajaActivaId — la sesion resuelta es siempre la propia, no elegible por asignacion (Design §Decision 5).`
+    )
+  }
+
+  if (entryPoint === 'TRADICIONAL' && tieneSesionEfectivo && !sesionDestinoId) {
+    throw new Error(
+      `origenDinero invalido: desde 'TRADICIONAL', una asignacion SESION_EFECTIVO exige sesionDestinoId — una sola sesion elegida para toda la NC (Design §Decision 5).`
     )
   }
 }
@@ -226,22 +265,32 @@ export interface CrearNotaCreditoParams {
   entryPoint: 'POS' | 'TRADICIONAL'
   /** Id de la sesion de caja activa del cajero — solo relevante cuando `entryPoint === 'POS'`. */
   sesionCajaActivaId?: string
+  /**
+   * Sesion UNICA elegida para recibir el reintegro cuando `entryPoint ===
+   * 'TRADICIONAL'` y `origenDinero` contiene alguna asignacion
+   * `SESION_EFECTIVO` (Slice 2 REWORK, Design §Decision 5). Obligatorio en
+   * ese caso (`validarOrigenDinero` rechaza si falta) — una sola sesion por
+   * NC, nunca elegida per-asignacion. Irrelevante para `entryPoint ===
+   * 'POS'` (siempre usa `sesionCajaActivaId`).
+   */
+  sesionDestinoId?: string
   /** Modalidad de liquidacion elegida (Slice 3, obligatoria). */
   modalidad: LiquidacionModalidad
   /**
-   * Origen especifico del dinero cuando la modalidad MUEVE efectivo/tarjeta
-   * (Slice 2, Design §origenDinero shape/decoupling). Obligatorio SOLO
+   * Array de asignaciones de origen del dinero cuando la modalidad MUEVE
+   * efectivo/tarjeta (Slice 2 REWORK, Design §Decision 5, obs
+   * #2948/#2949). Reemplaza el objeto unico pre-rework: un NC puede
+   * combinar VARIAS cuentas (sesion + tesoreria + banco) en un solo
+   * reintegro — el monto reintegrado NUNCA es un input separado, se
+   * DERIVA como la suma del array. Obligatorio (array no vacio) SOLO
    * cuando `modalidad` mueve dinero (`EFECTIVO_REAL` | `REFUND_TESORERIA`)
-   * — validado ANTES de abrir la transaccion via `validarOrigenDinero`
-   * (incluye la Decision 4 asimetrica-por-ruta, obs #2938: desde POS,
-   * `SESION_EFECTIVO` DEBE ser la propia `sesionCajaActivaId`; desde
-   * TRADICIONAL puede ser cualquier sesion activa, tesoreria o banco).
-   * Omitido para las 3 modalidades sin desembolso. `TESORERIA_EFECTIVO`/
-   * `BANCO` validan su shape aqui, pero el WRITE branch de
-   * REFUND_TESORERIA recien se implementa en Slice 3 — sigue lanzando "aun
-   * no implementado" sin importar este campo.
+   * — validado ANTES de abrir la transaccion via `validarOrigenDinero`.
+   * Omitido/vacio para las 3 modalidades sin desembolso. El array puede
+   * cubrir MENOS que el remanente total (el resto queda como credito a
+   * favor, SAFC) — esa logica de invariante-de-suma + escritura
+   * multi-cuenta es Slice 3a/3b; este slice solo valida forma pura.
    */
-  origenDinero?: OrigenDinero
+  origenDinero?: OrigenDinero[]
   /**
    * Defensa en profundidad / prueba directa del gate anti-fraude: NUNCA se
    * envia en el flujo normal junto a una modalidad no-efectivo. El egreso
@@ -433,6 +482,7 @@ export async function crearNotaCredito(
     empresa_id,
     entryPoint,
     sesionCajaActivaId,
+    sesionDestinoId,
     modalidad,
     origenDinero,
     egresoParams,
@@ -445,16 +495,16 @@ export async function crearNotaCredito(
   // transaccion — sin tocar la DB. Ver `assertGateAntiFraudeNoDesembolso`.
   assertGateAntiFraudeNoDesembolso(modalidad, egresoParams)
 
-  // 0c. Validacion de origenDinero (Slice 2, Design §origenDinero
-  // shape/decoupling + §Decision 4): igual que el gate anterior, se evalua
-  // ANTES de abrir la transaccion — sin tocar la DB. Ver `validarOrigenDinero`.
-  validarOrigenDinero({ modalidad, entryPoint, sesionCajaActivaId, origenDinero })
+  // 0c. Validacion de origenDinero (Slice 2 REWORK, Design §Decision 5):
+  // igual que el gate anterior, se evalua ANTES de abrir la transaccion —
+  // sin tocar la DB. Ver `validarOrigenDinero`.
+  validarOrigenDinero({ modalidad, entryPoint, sesionCajaActivaId, sesionDestinoId, origenDinero })
 
-  // REFUND_TESORERIA esta validado por el tipo pero se implementa recien en
-  // Slice 3 (Design §5, "no requiere schema nuevo" pero SI logica nueva que
-  // aun no existe en este slice).
+  // REFUND_TESORERIA ya valida su array (forma pura) pero el WRITE branch
+  // multi-cuenta recien se implementa en Slice 3a/3b (design.md Pass
+  // 1/Pass 2, two-pass sobre el array).
   if (modalidad === 'REFUND_TESORERIA') {
-    throw new Error('REFUND_TESORERIA aun no esta implementado (ver Slice 3)')
+    throw new Error('REFUND_TESORERIA aun no esta implementado (ver Slice 3a/3b)')
   }
 
   let ncrId = ''
@@ -956,6 +1006,17 @@ export async function crearNotaCredito(
         [venta_id]
       )
 
+      // Slice 2 REWORK (deviation, Design §Decision 5): este loop TODAVIA
+      // NO implementa el two-pass multi-cuenta real (eso es Slice 3a/3b) —
+      // sigue reversando CADA pago original 1:1 en `movimientos_metodo_cobro`
+      // (comportamiento Slice 1/2 sin cambios). Lo UNICO que el array
+      // `origenDinero` aporta en este slice es la cuenta que se estampa en
+      // `sesion_caja_id`: se toma la PRIMERA asignacion `SESION_EFECTIVO`
+      // del array (equivalente exacto del objeto unico pre-rework cuando el
+      // array tiene una sola asignacion de ese tipo — el unico caso que
+      // los llamadores actuales, pre-Slice-4, producen).
+      const sesionEfectivoAsignacion = origenDinero?.find((a) => a.tipo === 'SESION_EFECTIVO')
+
       if (movesCash && pagosResult.rows) {
         for (let i = 0; i < pagosResult.rows.length; i++) {
           const pago = pagosResult.rows.item(i) as {
@@ -977,13 +1038,14 @@ export async function crearNotaCredito(
               ncrId,
               `NCR-${nroNcr}`,
               `Devolucion NCR ${nroNcr} - Venta ${venta.nro_factura}`,
-              // Slice 2 (Decision 4 cuadre invariant): la cuenta que ve el
-              // egreso es la ELEGIDA por origenDinero, no la del cajero que
-              // emite la NC. `movesCash` solo es true para EFECTIVO_REAL
-              // dentro de esta tx (REFUND_TESORERIA ya lanzo mas arriba,
-              // antes de abrir la transaccion) y `validarOrigenDinero` ya
-              // garantizo `origenDinero.tipo === 'SESION_EFECTIVO'`.
-              origenDinero?.cuentaId ?? null,
+              // Slice 2 REWORK (Decision 4/5 cuadre invariant): la cuenta
+              // que ve el egreso es la ELEGIDA por origenDinero, no la del
+              // cajero que emite la NC. `movesCash` solo es true para
+              // EFECTIVO_REAL dentro de esta tx (REFUND_TESORERIA ya lanzo
+              // mas arriba, antes de abrir la transaccion) y
+              // `validarOrigenDinero` ya garantizo que si el array llego
+              // hasta aqui, es no-vacio.
+              sesionEfectivoAsignacion?.cuentaId ?? null,
               now,
               now,
               usuario_id,

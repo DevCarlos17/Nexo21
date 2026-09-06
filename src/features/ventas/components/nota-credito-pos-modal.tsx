@@ -336,14 +336,35 @@ export function NotaCreditoPosModal({ isOpen, onClose, sesion }: NotaCreditoPosM
         entryPoint: 'POS',
         sesionCajaActivaId: sesion.id,
         modalidad,
-        // Slice 2 (decouple, Design §origenDinero shape/decoupling): SOLO
-        // EFECTIVO_REAL mueve dinero — `origenDinero` queda OMITIDO para
-        // SALDO_FAVOR/AJUSTE_CXC/COMPENSACION_VENTA (el gate extension de
-        // `validarOrigenDinero` rechaza si se envia igual). El POS-express
-        // esta SIEMPRE restringido a su propia sesion activa (carril
-        // protegido, Design §Decision 4) — nunca ofrece elegir otra cuenta.
+        // Slice 2 REWORK (Design §Decision 5): SOLO EFECTIVO_REAL mueve
+        // dinero — `origenDinero` queda OMITIDO (array vacio/undefined)
+        // para SALDO_FAVOR/AJUSTE_CXC/COMPENSACION_VENTA (el gate extension
+        // de `validarOrigenDinero` rechaza si se envia igual). El
+        // POS-express esta SIEMPRE restringido a su propia sesion activa
+        // (carril protegido, Design §Decision 4) — nunca ofrece elegir
+        // otra cuenta.
+        // STUB (Slice 4, multi-origin picker UI — NO construido todavia):
+        // el array de una sola asignacion + `monto: factura.total_usd` es
+        // un mapeo MINIMO para mantener este caller compilando bajo el
+        // nuevo contrato array. Dos simplificaciones deliberadas, ambas
+        // deferidas a Slice 4:
+        // (a) `cuentaId: sesion.id` sigue siendo una sesion, NO el
+        //     `metodos_cobro.id` real de "Efectivo USD"/"Efectivo Bs" que
+        //     exige Decision 5 — el WRITE branch heredado (paso 6c, sin
+        //     cambios en este slice) tambien sigue tratandolo como sesion,
+        //     asi que el comportamiento observable es IDENTICO al objeto
+        //     unico pre-rework.
+        // (b) `monto` no se usa hoy por el WRITE branch (que sigue
+        //     reversando cada `pago.monto` original, no este campo) — solo
+        //     necesita ser > 0 para pasar la Rule 3 pura de
+        //     `validarOrigenDinero`. Slice 3a lo hara el dato real que se
+        //     escribe.
         ...(modalidad === 'EFECTIVO_REAL'
-          ? { origenDinero: { tipo: 'SESION_EFECTIVO' as const, cuentaId: sesion.id } }
+          ? {
+              origenDinero: [
+                { tipo: 'SESION_EFECTIVO' as const, cuentaId: sesion.id, monto: factura.total_usd },
+              ],
+            }
           : {}),
         ...(lineasParcial ? { tipo: 'PARCIAL' as const, lineas: lineasParcial } : {}),
         // PIN B (Slice 5a-2b): `resolverDepositoOverride` retorna `null`

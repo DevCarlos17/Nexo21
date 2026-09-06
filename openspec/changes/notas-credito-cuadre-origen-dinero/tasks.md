@@ -2,14 +2,16 @@
 
 **Test runner cache**: `yarn test:run` (Vitest single-run), `yarn type-check` (app), `yarn type-check:test` (tests). **`yarn` NEVER `npm`.** Strict TDD — every pure function/validation is RED (failing test) → GREEN (implementation) before the component/hook that consumes it. Real money/kardex/CxC/cuadre paths: RED-first is non-negotiable, no exceptions.
 
+**REWORK NOTICE (this revision)**: the money model changed mid-implementation from single-account `origenDinero:{tipo,cuentaId}` to multi-source `origenDinero: Array<{tipo,cuentaId,monto}>` (obs #2948/#2949/#2938/#2945/#2950; `design.md` is the plan of record). Slice 1 is DONE and unaffected. Slices 2 and 3 are **committed on the old model and are REWORKED below** (new commits stacked on their existing chain branches — mirrors the precedent already set by the 3.7 remanente amendment: a new commit, never `git commit --amend`, so the chain's history stays intact). Slice 4 is net-new UI work. Slices 5/6 keep their original scope with one added regression task each where the multi-source model touches them.
+
 ## Review Workload Forecast
 
 | Field | Value |
 |-------|-------|
-| Estimated changed lines | ~1900–2300 total across 6 slices |
+| Estimated changed lines | ~2250–2900 total across 6 slices (was ~1900–2300 pre-rework) |
 | 400-line budget risk | High |
 | Chained PRs recommended | Yes |
-| Suggested split | 6 PRs, one per slice, feature-branch-chain |
+| Suggested split | 7 PRs, feature-branch-chain. Slice 3 SPLIT INTO 3a/3b (owner-confirmed) — see below |
 | Delivery strategy | ask-on-risk |
 | Chain strategy | feature-branch-chain |
 
@@ -18,90 +20,95 @@ Chained PRs recommended: Yes
 Chain strategy: feature-branch-chain
 400-line budget risk: High
 
-### Per-slice estimate
+### Per-slice estimate (honest re-forecast)
 
-| Slice | Est. lines | >400 alone? | Depends on |
+| Slice | Est. lines | Actual so far | Note |
 |---|---|---|---|
-| 1 Schema | 60–90 | No | None — base of tracker |
-| 2 Decouple regla de oro | 350–450 | Borderline | Slice 1 (`entry_point`) |
-| 3 REFUND_TESORERIA | 300–400 | Borderline | Slice 2 (`origenDinero` shape) |
-| 4 Selector + guard | 350–450 | Borderline | Slice 2 (shape) + Slice 3 (write path) |
-| 5 Cuadre | 400–500 | Yes — new harness | Slice 4 (`sesion_caja_id` write) |
-| 6 Badge | 40–70 | No | Slice 1 (`entry_point` column) |
+| 1 Schema | 60–90 | ~156 (39 code/test + 117 migration SQL) | DONE — kept as-is, not re-planned |
+| 2 Decouple (REWORK) | 500–650 | 283 (old model, `bfa7dd9`) | Array type + two-pass pure validation + rewrite ~15 describes + 6 new rule cases inflate this past the original single-account commit |
+| 3 Multi-source write (REWORK) | 750–950 | 758 (`782558e`+`9c6f576` combined — **already over budget on the OLD single-account model**) | Highest risk: delete FIFO code, uniform two-pass write across 3 account types incl. real `metodos_cobro` balance tracking (was a placeholder), cash-availability guard, leftover→SAFC generalization, mixed-type integration tests |
+| 4 Multi-origin picker UI | 500–650 | — (new) | Up from original 350–450: multi-row add/remove, live running total, per-row native-currency input, once-per-NC session selector |
+| 5 Cuadre | 400–500 | — (new) | Unchanged scope from original design (no production code change per design.md — GROUP BY already handles multi-row); risk stays High only because there is zero existing test harness for `use-cuadre.ts` |
+| 6 Badge | 40–70 | — (new) | Unchanged |
 
-**Overall**: ≈1900–2300 lines total; every mid-chain slice is at/above 400 alone → chained PRs mandatory (matches proposal.md).
+**Slice 3 split — DECIDED (owner-confirmed via ask-on-risk gate)**: Slice 3's OLD model already landed at 758 lines — over budget before rework. It is SPLIT into two chained child PRs so each stays reviewable and separates the mechanical write-core from the money business-rules:
+- **3a** (tasks 3.8–3.10, 3.14–3.16): delete FIFO/`capearEgresosPorRemanente`, implement the two-pass resolve + uniform 3-type write core. Branch `ncr-cuadre-03a-write-core` → base `9c6f576` on `feat/ncr-cuadre-03-refund-tesoreria`.
+- **3b** (tasks 3.11–3.13, 3.17–3.18): cash-availability HARD-cap guard (obs #2950), leftover→SAFC generalization, `metodos_cobro.saldo_actual` real tracking, mixed-type + closed-session-once integration tests. Branch `ncr-cuadre-03b-guards-safc` → base 3a.
+Also RESOLVED: Decision 5 (`SESION_EFECTIVO.cuentaId` = `metodos_cobro.id`, not session id) — owner-confirmed, rework proceeds on this mapping.
 
 ### Suggested Work Units (feature-branch-chain)
 
-| Unit | Goal | Branch → Base |
-|---|---|---|
-| 1 | Migration 0092 + schema.ts + persist at INSERT | `ncr-cuadre-01-schema` → `feat/ncr-cuadre-origen-dinero` (tracker) |
-| 2 | `origenDinero` shape, validation, drop same-session rule, rewrite tests | `ncr-cuadre-02-decouple` → `01-schema` |
-| 3 | REFUND_TESORERIA write branch | `ncr-cuadre-03-refund-tesoreria` → `02-decouple` |
-| 4 | Selector + guard UI, both modals | `ncr-cuadre-04-selector-guard` → `03-refund-tesoreria` |
-| 5 | Cuadre hooks + component | `ncr-cuadre-05-cuadre` → `04-selector-guard` |
-| 6 | Badge "vía administración" | `ncr-cuadre-06-badge` → `05-cuadre` |
+| Unit | Goal | Branch → Base | Mode |
+|---|---|---|---|
+| 1 | Migration 0092 + schema.ts + persist at INSERT | `ncr-cuadre-01-schema` → tracker | DONE |
+| 2 | Array `origenDinero`, two-pass pure validation, `sesionDestinoId`, rewrite old tests | `ncr-cuadre-02-decouple` (new commit on existing branch, base `bfa7dd9`) | REWORK |
+| 3a | Delete FIFO + two-pass resolve + uniform 3-type write core | `ncr-cuadre-03a-write-core` → base `9c6f576` on `03-refund-tesoreria` | REWORK |
+| 3b | Cash-availability guard + leftover→SAFC + real `metodos_cobro` tracking + mixed-type tests | `ncr-cuadre-03b-guards-safc` → `03a-write-core` | REWORK |
+| 4 | Multi-origin picker UI, both modals | `ncr-cuadre-04-selector-guard` → `03b-guards-safc` | NEW |
+| 5 | Cuadre hooks + component | `ncr-cuadre-05-cuadre` → `04-selector-guard` | Unchanged |
+| 6 | Badge "vía administración" | `ncr-cuadre-06-badge` → `05-cuadre` | Unchanged |
 
 Only the tracker merges to `develop` (opened draft/no-merge from the start). Each PR targets the immediately-previous slice branch (except PR #1 → tracker), keeping every diff focused.
 
-**Delivery note**: tester is on a different PC — push each slice branch to `origin` before requesting QA on it.
+**Delivery note**: tester is on a different PC — push each slice branch to `origin` before requesting QA on it. Slices 2/3 rework must be pushed together (or in dependency order) since PR #3 rebuilds on PR #2's new shape.
 
 ---
 
-## Phase 1: Schema (Slice 1 — `entry_point`)
+## Phase 1: Schema (Slice 1 — `entry_point`) — DONE, unchanged
 
-- [x] 1.1 RED: assert (extend `use-notas-credito.test.ts` insert-shape check) that the `notas_credito` INSERT includes `entry_point: params.entryPoint`. Must fail now.
-- [x] 1.2 GREEN: `migrations/0092_notas_credito_entry_point_refund.sql` — `ADD COLUMN IF NOT EXISTS entry_point TEXT` → backfill `CASE WHEN sesion_caja_id IS NOT NULL THEN 'POS' ELSE 'TRADICIONAL' END` → `SET NOT NULL` → `SET DEFAULT 'TRADICIONAL'` → `CHECK (entry_point IN ('POS','TRADICIONAL'))`. Idempotent per `0091` template.
-- [x] 1.3 Same migration: `mov_caja_fuerte_origen_check` DROP/ADD, append `'REFUND_NCR'` to the 5 existing values (`0035:39`).
-- [x] 1.4 Same migration: `movimientos_bancarios_origen_check` DROP/ADD, append `'REFUND_NCR'` to the 8 existing values (`0077:24-26`). Document rollback (restore both CHECKs) in the header.
-- [x] 1.5 GREEN: add `entry_point: column.text` to `notas_credito` in `schema.ts` (`:753-778`).
-- [x] 1.6 GREEN: persist `entry_point: params.entryPoint` at the existing INSERT (`use-notas-credito.ts:603-629`) — passes 1.1.
-- [x] 1.7 Verify green (`type-check`, `type-check:test`, `test:run`). Push `ncr-cuadre-01-schema`, open PR #1 → base tracker (draft).
+- [x] 1.1–1.7 Migration `0092`, `schema.ts` column, INSERT persistence, verified green. Commit `365c3b2` on `feat/ncr-cuadre-01-schema`. Valid under the new model — no rework needed.
 
-## Phase 2: Decouple "regla de oro" (Slice 2)
+## Phase 2: Decouple "regla de oro" — REWORK (Slice 2, array model) — DONE
 
-- [x] 2.1 RED: rewrite the describe blocks asserting the old same-session boolean — flip to expect the `origenDinero` shape and dropped same-session rule. Must FAIL until 2.3–2.5.
-- [x] 2.2 RED: add validation cases (pure, pre-tx): `EFECTIVO_REAL` + non-`SESION_EFECTIVO` → throw; `REFUND_TESORERIA` + `SESION_EFECTIVO` → throw; no-desembolso + `origenDinero` defined → throw; `entryPoint==='POS'` + `SESION_EFECTIVO` + `cuentaId !== sesionCajaActivaId` → throw (Decision 4).
-- [x] 2.3 GREEN: add `origenDinero: { tipo: 'SESION_EFECTIVO'|'TESORERIA_EFECTIVO'|'BANCO', cuentaId: string }` (optional) to `CrearNotaCreditoParams`.
-- [x] 2.4 GREEN: implement the pre-tx validation function per design.md lines 45-52 — passes 2.2. (`validarOrigenDinero`, exported, pure.)
-- [x] 2.5 GREEN: replace the boolean at `:418-422` with `movesCash` (= `!esModalidadNoDesembolso(modalidad)`). Drop the same-session-as-sale requirement — passes 2.1. (Deviation: `sesionValida`/`sesionStatus(cuentaId)==='ABIERTA'` NOT implemented here — the closed-session DB read is explicitly Slice 4's task 4.4/4.7 "write-time SELECT"; implementing it now would duplicate that slice. Within the tx, `movesCash` is only ever true for `EFECTIVO_REAL` — `REFUND_TESORERIA` already threw before the tx opened — so no `TESORERIA_EFECTIVO`/`BANCO` write can reach here yet.)
-- [x] 2.6 GREEN: update the `SESION_EFECTIVO` write loop (`:867-885`) to use `sesion_caja_id: origenDinero?.cuentaId ?? null` (Decision 4 cuadre invariant).
-- [x] 2.7 Verify green; zero old-boolean (`aplicaReglaDeOro`) references remain. Committed locally on `feat/ncr-cuadre-02-decouple` (base `feat/ncr-cuadre-01-schema`) — NOT pushed, NOT PR'd (executor scope, orchestrator handles delivery).
+- [x] 2.8 RED: `OrigenDinero` type → `Array<{ tipo, cuentaId, monto }>` (`design.md` Decision 5 contract) — flip type-level fixtures/casts that assumed a single object.
+- [x] 2.9 RED: rewrite the ~15 existing describe blocks in `use-notas-credito.test.ts` that assert the OLD single-account shape and the dropped Rules 1/2 (`EFECTIVO_REAL` locked to `SESION_EFECTIVO` only; `REFUND_TESORERIA` locked to treasury/bank only) — must FAIL until 2.12.
+- [x] 2.10 RED: new pure `validarOrigenDinero` cases (design.md lines 59–65): non-empty array iff `!esModalidadNoDesembolso(modalidad)`; `AJUSTE_CXC`/no-desembolso ⇒ array empty/undefined; per-assignment `monto > 0`; no duplicate `(tipo, cuentaId)` pairs; `entryPoint==='POS'` + array contains `SESION_EFECTIVO` ⇒ resolved session is always `sesionCajaActivaId` (no per-assignment choice); `entryPoint==='TRADICIONAL'` + array contains `SESION_EFECTIVO` ⇒ `sesionDestinoId` required.
+- [x] 2.11 GREEN: `CrearNotaCreditoParams.origenDinero` → `OrigenDinero[]`; add `sesionDestinoId?: string`.
+- [x] 2.12 GREEN: rewrite `validarOrigenDinero` — DROP the old Rules 1/2 (type-per-modalidad restriction) entirely, implement the 6 rules above — passes 2.9/2.10.
+- [x] 2.13 Verify green (`type-check`, `type-check:test`, `test:run`). New commit on `feat/ncr-cuadre-02-decouple` (base `bfa7dd9`) — same precedent as the 3.7 amendment (new commit, never `--amend`). NOT pushed yet (push with 3.19).
 
-## Phase 3: REFUND_TESORERIA (Slice 3)
+## Phase 3: Multi-source write — REWORK (Slice 3, two-pass over the array)
 
-- [ ] 3.1 RED: rewrite `:699-707` (currently expects reject) to assert the new EGRESO shape for `TESORERIA_EFECTIVO` → `mov_caja_fuerte`/`caja_fuerte`. Must fail against `:363-365` throw.
-- [ ] 3.2 RED: mirror for `BANCO` → `movimientos_bancarios`/`bancos_empresa`. Extend `NcrTxFixtures` (`:122-139`) with `cajaFuerte`/`bancoEmpresa` saldo rows.
-- [ ] 3.3 RED: Decimal-precision assertions (`saldo_anterior`/`saldo_nuevo`/`monto` via `.toFixed(4)`, never `parseFloat`); `doc_origen_id`/`doc_origen_tipo` traceability; VES conversion via `venta.tasa`.
-- [ ] 3.4 RED: cross-tenant safety — target-account read filters `WHERE id=? AND empresa_id=?` (do not replicate `use-traspasos.ts:45/161/190` gap).
-- [ ] 3.5 GREEN: replace `:363-365` throw with the write branch (design.md lines 67-81): `BANCO ? bancos_empresa/movimientos_bancarios : caja_fuerte/mov_caja_fuerte`; one EGRESO per NC (`origen='REFUND_NCR'`, `validado=1`, `validado_por`, `validado_at`); `montoRefundUsd = totalUsdNc`; VES via `usdToBs(monto, venta.tasa)`; `UPDATE saldo_actual`; `empresa_id` stamped + filtered.
-- [ ] 3.6 Verify green (3.1–3.4 now pass). Push `ncr-cuadre-03-refund-tesoreria`, open PR #3 → base `02-decouple`.
+- [ ] 3.8 RED: assert `capearEgresosPorRemanente`/`PagoParaReversaEfectivo`/`EgresoReversaCapeado` are gone (compile-time absence + no references) — proves the FIFO-over-`pagos` model is fully removed, not just unused.
+- [ ] 3.9 RED: Pass-1 sum-invariant — `Σ(assignment→USD via venta.tasa) ≤ remanenteALiquidar + epsilon(0.005)` accepted; over-limit rejected; unknown/cross-empresa `cuentaId` rejected (design.md lines 69–87).
+- [ ] 3.10 RED: multi-assignment mixed-type integration test (owner's canonical example: Bs500 `SESION_EFECTIVO` + Bs500 `BANCO` in ONE NC) — writes to BOTH `movimientos_metodo_cobro` and `movimientos_bancarios`; closed-session guard evaluated ONCE for the resolved session, not per-assignment.
+- [ ] 3.11 RED: cash-availability guard (obs #2950) — `SESION_EFECTIVO`/`TESORERIA_EFECTIVO` assignment with `monto > saldo_actual` throws (HARD cap, read inside tx before write); `BANCO` assignment allows `saldo_actual` to go negative (soft cap, no throw).
+- [ ] 3.12 RED: leftover routing (design.md lines 108–123) — array covers less than `remanenteALiquidar` + `modalidad !== 'AJUSTE_CXC'` ⇒ SAFC write for `leftoverUsd` when `> epsilon`; `AJUSTE_CXC` keeps forcing an empty array (Rule 2) and uses the full `remanenteALiquidar`.
+- [ ] 3.13 RED: `metodos_cobro.saldo_actual` gets REAL tracking for `SESION_EFECTIVO` egresos (replaces the old hardcoded `saldo_anterior=0, saldo_nuevo=0` placeholder) — `.toFixed(4)` on `saldo_actual` (Decision 1 extension), `toStorageString` on `movimientos_metodo_cobro` row fields.
+- [ ] 3.14 GREEN: DELETE `capearEgresosPorRemanente`, `PagoParaReversaEfectivo`, `EgresoReversaCapeado`, and the now-dead `SELECT ... FROM pagos` that fed it — passes 3.8.
+- [ ] 3.15 GREEN: implement Pass 1 (resolve + accumulate, no writes) per design.md lines 69–87 — passes 3.9/3.11.
+- [ ] 3.16 GREEN: implement Pass 2 (uniform write loop over `resolved`) per design.md lines 89–106 — replaces the old `if(SESION_EFECTIVO)/else if(TESORERIA|BANCO)` branch with one loop across all three types — passes 3.10/3.13.
+- [ ] 3.17 GREEN: generalize Step B leftover routing per design.md lines 108–123 — passes 3.12.
+- [ ] 3.18 Verify green; confirm `pagos.is_reversed=1` UPDATE stays byte-identical (independent axis, obs #2948). New commit on `feat/ncr-cuadre-03-refund-tesoreria` (base `9c6f576`) — same precedent as 3.7. NOT pushed yet.
+- [ ] 3.19 Push `ncr-cuadre-02-decouple` and `ncr-cuadre-03-refund-tesoreria` (updated) to `origin`; open/update PR #2 → tracker, PR #3 → PR #2. If the risk flag above is accepted, split 3.14–3.18 into 3a (3.14–3.16) / 3b (3.17–3.18) branches/PRs instead of one.
 
-## Phase 4: Selector + guard (Slice 4)
+## Phase 4: Multi-origin picker UI — NEW (Slice 4)
 
-- [ ] 4.1 RED: flip `crear-ncr-modal.test.tsx:200-207` (button disabled) — assert enabled, dispatches `origenDinero`.
-- [ ] 4.2 RED: admin modal renders empresa-wide active-session selector (`useSesionesActivasDashboard`, `use-sesiones-caja.ts:337-355`) + tesorería + bank picker.
-- [ ] 4.3 RED: POS modal (`nota-credito-pos-modal.tsx`) LOCKS `SESION_EFECTIVO` to `sesion.id` — no cross-session option rendered (Decision 4).
-- [ ] 4.4 RED: closed-session guard — `SELECT status FROM sesiones_caja WHERE id=? AND empresa_id=?`; throw if missing/`CERRADA` (pattern `use-traspasos.ts:394-402`, applied at write time).
-- [ ] 4.5 GREEN: unfreeze `nota-credito-pos-modal.tsx` (`:53-55`) — origin UI locked to own `sesionCajaActivaId` for `SESION_EFECTIVO`; `TESORERIA_EFECTIVO`/`BANCO` selectable.
-- [ ] 4.6 GREEN: flip disabled button in `crear-ncr-modal.tsx:279-286`; wire empresa-wide pickers.
-- [ ] 4.7 GREEN: implement closed-session guard in the write tx, before egress write — passes 4.4.
-- [ ] 4.8 Verify green. Push `ncr-cuadre-04-selector-guard`, open PR #4 → base `03-refund-tesoreria`.
+- [ ] 4.1 RED: flip `crear-ncr-modal.test.tsx:200-207` — assert enabled, dispatches `origenDinero: OrigenDinero[]` (array, not single object).
+- [ ] 4.2 RED: admin modal (`crear-ncr-modal.tsx`) renders a multi-row picker — add/remove assignment rows (tipo + cuenta selector + native-currency amount input); the empresa-wide session selector for `SESION_EFECTIVO` rows appears ONCE (`sesionDestinoId`), not per-row.
+- [ ] 4.3 RED: POS modal (`nota-credito-pos-modal.tsx`) LOCKS any `SESION_EFECTIVO` row's account to the empresa's cash `metodos_cobro` for `sesion.id` — no session selector rendered (Decision 4).
+- [ ] 4.4 RED: live running total — `Σ(rows→USD)` vs `remanenteALiquidar`; disable submit when over; show "se dejará $X como crédito a favor" hint when under.
+- [ ] 4.5 RED: closed-session guard surfaced in UI — hide/disable a `SESION_EFECTIVO` option pointing at a `CERRADA` session (write-time guard from 3.10/3.15 stays the source of truth; this is a UX pre-check).
+- [ ] 4.6 GREEN: unfreeze `nota-credito-pos-modal.tsx` with the multi-row picker, restricted per 4.3.
+- [ ] 4.7 GREEN: flip disabled button + wire multi-row picker in `crear-ncr-modal.tsx` — passes 4.1/4.2.
+- [ ] 4.8 GREEN: running total + hint + closed-session UX guard — passes 4.4/4.5.
+- [ ] 4.9 Verify green. Push `ncr-cuadre-04-selector-guard` (base `feat/ncr-cuadre-03-refund-tesoreria`, post-rework), open PR #4 → base `03-refund-tesoreria`.
 
-## Phase 5: Cuadre (Slice 5)
+## Phase 5: Cuadre (Slice 5) — unchanged scope, one added regression task
 
 - [ ] 5.1 RED: new test harness for `use-cuadre.ts` (zero existing tests) — reuse the mock pattern from `use-notas-credito.test.ts:118+`. New `__tests__` dir.
 - [ ] 5.2 RED: `useTotalesFiscales` NC total moves from date-scoped to session-scoped via `buildCuadreWhere(filters, empresaId)` on `notas_credito`.
-- [ ] 5.3 RED: new `useReintegrosPorMetodo(filters)` — `movimientos_metodo_cobro` JOIN `metodos_cobro` JOIN `notas_credito ON doc_origen_id` WHERE `origen='NCR'`, session-scoped, GROUP BY método, surfaces `nro_ncr`.
-- [ ] 5.4 RED: new `useNotasCreditoDeSesion(filters)` — `notas_credito` scoped by `buildCuadreWhere` JOIN `ventas` for contado/crédito split.
-- [ ] 5.5 GREEN: implement `useTotalesFiscales` change (`:1137-1146`) — passes 5.2.
+- [ ] 5.3 RED: `useReintegrosPorMetodo(filters)` — `movimientos_metodo_cobro` JOIN `metodos_cobro` JOIN `notas_credito ON doc_origen_id` WHERE `origen='NCR'`, session-scoped, GROUP BY método, surfaces `nro_ncr`.
+- [ ] 5.4 RED: `useNotasCreditoDeSesion(filters)` — `notas_credito` scoped by `buildCuadreWhere` JOIN `ventas` for contado/crédito split.
+- [ ] 5.5 GREEN: implement `useTotalesFiscales` change — passes 5.2.
 - [ ] 5.6 GREEN: implement `useReintegrosPorMetodo` — passes 5.3.
 - [ ] 5.7 GREEN: implement `useNotasCreditoDeSesion` — passes 5.4.
 - [ ] 5.8 GREEN: create `cuadre-notas-credito.tsx` rendering 5.6+5.7 as sibling sections; add RTL rendering test.
-- [ ] 5.9 Add regression test proving `useSaldoEfectivoBimonetario` nets correctly once Slice 2's `sesion_caja_id` write lands — no code change needed there. Do NOT touch `usePagosPorMetodo` (stays untouched).
-- [ ] 5.10 Verify green. Push `ncr-cuadre-05-cuadre`, open PR #5 → base `04-selector-guard`.
+- [ ] 5.9 Regression test: `useSaldoEfectivoBimonetario` nets correctly once Slice 3's real `sesion_caja_id`/`metodos_cobro.saldo_actual` writes land — no code change needed there. Do NOT touch `usePagosPorMetodo` (stays untouched).
+- [ ] 5.10 NEW — multi-source regression: one NC's array mixing `SESION_EFECTIVO`+`BANCO` produces >1 row in `useReintegrosPorMetodo` output, both sharing the same `nro_ncr` via `doc_origen_id` — assert GROUP BY already handles it (design.md's "no code change needed" claim), coverage only.
+- [ ] 5.11 Verify green. Push `ncr-cuadre-05-cuadre`, open PR #5 → base `04-selector-guard`.
 
-## Phase 6: Badge (Slice 6)
+## Phase 6: Badge (Slice 6) — unchanged
 
 - [ ] 6.1 RED: POS facturas list shows "vía administración" badge when `entry_point==='TRADICIONAL'`, none when `'POS'`.
 - [ ] 6.2 GREEN: add the badge, keyed off `entry_point`.

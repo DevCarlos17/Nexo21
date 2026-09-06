@@ -495,83 +495,153 @@ describe('crearNotaCredito — Slice B (change guarda-deposito-inactivo): fallba
   })
 })
 
-describe('validarOrigenDinero — funcion pura (Slice 2, Design §origenDinero shape/decoupling)', () => {
+describe('validarOrigenDinero — funcion pura, contrato ARRAY multi-origen (Slice 2 REWORK, Design §Decision 5, obs #2948/#2949)', () => {
+  function asignacion(overrides: Partial<OrigenDinero> = {}): OrigenDinero {
+    return { tipo: 'SESION_EFECTIVO', cuentaId: 'metodo-efectivo-usd', monto: '30.00', ...overrides }
+  }
+
   function validarBase(overrides: Partial<Parameters<typeof validarOrigenDinero>[0]> = {}) {
     return validarOrigenDinero({
       modalidad: 'EFECTIVO_REAL',
       entryPoint: 'POS',
       sesionCajaActivaId: 'sesion-activa-1',
-      origenDinero: { tipo: 'SESION_EFECTIVO', cuentaId: 'sesion-activa-1' },
+      origenDinero: [asignacion()],
       ...overrides,
     })
   }
 
-  it('EFECTIVO_REAL + origenDinero.tipo !== SESION_EFECTIVO: rechaza', () => {
-    expect(() =>
-      validarBase({ origenDinero: { tipo: 'TESORERIA_EFECTIVO', cuentaId: 'caja-fuerte-1' } })
-    ).toThrow(/EFECTIVO_REAL/i)
+  // Rule 1 (design.md linea 60): modalidad de desembolso exige array NO vacio.
+  it('modalidad de desembolso (EFECTIVO_REAL) + origenDinero vacio ([]): rechaza — el dinero real exige al menos una asignacion', () => {
+    expect(() => validarBase({ origenDinero: [] })).toThrow(/al menos una asignacion|no vacio/i)
   })
 
-  it('EFECTIVO_REAL + origenDinero indefinido: rechaza (dinero real exige cuenta explicita)', () => {
-    expect(() => validarBase({ origenDinero: undefined })).toThrow(/EFECTIVO_REAL/i)
+  it('modalidad de desembolso (EFECTIVO_REAL) + origenDinero indefinido: rechaza', () => {
+    expect(() => validarBase({ origenDinero: undefined })).toThrow(/al menos una asignacion|no vacio/i)
   })
 
-  it('REFUND_TESORERIA + origenDinero.tipo === SESION_EFECTIVO: rechaza (el cajon POS no financia tesoreria)', () => {
+  it('modalidad de desembolso (REFUND_TESORERIA) + array con CUALQUIER tipo de cuenta: NO rechaza — Rules 1/2 viejas (tipo restringido por modalidad) fueron DROPPED (design.md §Decision 5)', () => {
     expect(() =>
       validarBase({
         modalidad: 'REFUND_TESORERIA',
-        origenDinero: { tipo: 'SESION_EFECTIVO', cuentaId: 'sesion-activa-1' },
+        origenDinero: [asignacion({ tipo: 'BANCO', cuentaId: 'banco-1' })],
       })
-    ).toThrow(/REFUND_TESORERIA/i)
+    ).not.toThrow()
   })
 
+  it('modalidad de desembolso (EFECTIVO_REAL) + array con tipo TESORERIA_EFECTIVO/BANCO (sin SESION_EFECTIVO): NO rechaza — un NC puede mezclar tipos libremente ahora (owner canonical example)', () => {
+    expect(() =>
+      validarBase({ origenDinero: [asignacion({ tipo: 'BANCO', cuentaId: 'banco-1' })] })
+    ).not.toThrow()
+  })
+
+  // Rule 2 (design.md linea 61): modalidad no-desembolso exige array vacio/undefined.
   it.each(['SALDO_FAVOR', 'COMPENSACION_VENTA', 'AJUSTE_CXC'] as const)(
-    'modalidad no-desembolso %s + origenDinero definido: rechaza (gate extension)',
+    'modalidad no-desembolso %s + origenDinero NO vacio: rechaza (gate extension)',
     (modalidad) => {
-      expect(() =>
-        validarBase({ modalidad, origenDinero: { tipo: 'SESION_EFECTIVO', cuentaId: 'sesion-activa-1' } })
-      ).toThrow(/no-desembolso|no admite/i)
+      expect(() => validarBase({ modalidad, origenDinero: [asignacion()] })).toThrow(/no-desembolso|no admite/i)
     }
   )
 
-  it('modalidad no-desembolso SIN origenDinero: no rechaza (flujo normal)', () => {
+  it('modalidad no-desembolso SIN origenDinero (undefined): no rechaza (flujo normal)', () => {
+    expect(() => validarBase({ modalidad: 'AJUSTE_CXC', origenDinero: undefined })).not.toThrow()
+  })
+
+  it('modalidad no-desembolso con origenDinero=[] (array vacio explicito): no rechaza', () => {
+    expect(() => validarBase({ modalidad: 'AJUSTE_CXC', origenDinero: [] })).not.toThrow()
+  })
+
+  // Rule 3 (design.md linea 62): cada asignacion exige monto > 0.
+  it('asignacion con monto = "0": rechaza', () => {
+    expect(() => validarBase({ origenDinero: [asignacion({ monto: '0' })] })).toThrow(/monto/i)
+  })
+
+  it('asignacion con monto negativo: rechaza', () => {
+    expect(() => validarBase({ origenDinero: [asignacion({ monto: '-5.00' })] })).toThrow(/monto/i)
+  })
+
+  it('asignacion con monto > 0: no rechaza por esta regla', () => {
+    expect(() => validarBase({ origenDinero: [asignacion({ monto: '0.01' })] })).not.toThrow()
+  })
+
+  // Rule 4 (design.md linea 63): no duplicar (tipo, cuentaId) — defensivo, evita doble-conteo de una cuenta.
+  it('dos asignaciones con el MISMO (tipo, cuentaId): rechaza (duplicado)', () => {
     expect(() =>
-      validarBase({ modalidad: 'AJUSTE_CXC', origenDinero: undefined })
+      validarBase({
+        origenDinero: [
+          asignacion({ cuentaId: 'metodo-1' }),
+          asignacion({ cuentaId: 'metodo-1' }),
+        ],
+      })
+    ).toThrow(/duplicad/i)
+  })
+
+  it('dos asignaciones con el MISMO cuentaId pero DISTINTO tipo (tablas distintas): NO rechaza', () => {
+    expect(() =>
+      validarBase({
+        origenDinero: [
+          asignacion({ tipo: 'SESION_EFECTIVO', cuentaId: 'cuenta-x' }),
+          asignacion({ tipo: 'BANCO', cuentaId: 'cuenta-x' }),
+        ],
+      })
     ).not.toThrow()
   })
 
-  it('Decision 4 — POS + SESION_EFECTIVO apuntando a OTRA sesion (no la propia activa): rechaza (carril protegido)', () => {
-    expect(() =>
-      validarBase({
-        entryPoint: 'POS',
-        sesionCajaActivaId: 'sesion-activa-1',
-        origenDinero: { tipo: 'SESION_EFECTIVO', cuentaId: 'sesion-de-otro-cajero' },
-      })
-    ).toThrow(/propia|carril|POS/i)
+  // Rule 5 (design.md linea 64): POS + SESION_EFECTIVO en el array ⇒ la sesion
+  // resuelta es SIEMPRE sesionCajaActivaId (no hay eleccion por-asignacion,
+  // Decision 5) — validado aqui como "sesionCajaActivaId debe estar definido"
+  // (simetrico a la Rule 6 de TRADICIONAL). El array YA NO restringe tipos
+  // por entryPoint (a diferencia de las Rules 1/2 viejas).
+  it('POS + array contiene SESION_EFECTIVO + sesionCajaActivaId definido: NO rechaza', () => {
+    expect(() => validarBase({ entryPoint: 'POS', sesionCajaActivaId: 'sesion-activa-1' })).not.toThrow()
   })
 
-  it('Decision 4 — POS + SESION_EFECTIVO apuntando a la PROPIA sesion activa: NO rechaza', () => {
+  it('POS + array contiene SESION_EFECTIVO + sesionCajaActivaId FALTANTE: rechaza (la sesion resuelta es siempre la propia, no elegible por asignacion)', () => {
+    expect(() => validarBase({ entryPoint: 'POS', sesionCajaActivaId: undefined })).toThrow(
+      /sesionCajaActivaId|propia|POS/i
+    )
+  })
+
+  it('POS + array SOLO con TESORERIA_EFECTIVO/BANCO (sin SESION_EFECTIVO): sesionCajaActivaId NO requerido', () => {
     expect(() =>
       validarBase({
         entryPoint: 'POS',
-        sesionCajaActivaId: 'sesion-activa-1',
-        origenDinero: { tipo: 'SESION_EFECTIVO', cuentaId: 'sesion-activa-1' },
+        sesionCajaActivaId: undefined,
+        modalidad: 'REFUND_TESORERIA',
+        origenDinero: [asignacion({ tipo: 'BANCO', cuentaId: 'banco-1' })],
       })
     ).not.toThrow()
   })
 
-  it('Decision 4 — TRADICIONAL + SESION_EFECTIVO apuntando a CUALQUIER otra sesion activa: NO rechaza (carril flexible, empresa-wide)', () => {
+  // Rule 6 (design.md linea 65): TRADICIONAL + SESION_EFECTIVO en el array ⇒
+  // sesionDestinoId obligatorio (una sola sesion por NC, elegida por el usuario).
+  it('TRADICIONAL + array contiene SESION_EFECTIVO + sesionDestinoId definido: NO rechaza', () => {
     expect(() =>
       validarBase({
         entryPoint: 'TRADICIONAL',
         sesionCajaActivaId: undefined,
-        origenDinero: { tipo: 'SESION_EFECTIVO', cuentaId: 'sesion-de-cualquier-cajero' },
+        sesionDestinoId: 'sesion-destino-1',
+      })
+    ).not.toThrow()
+  })
+
+  it('TRADICIONAL + array contiene SESION_EFECTIVO + sesionDestinoId FALTANTE: rechaza (sesion unica por NC obligatoria)', () => {
+    expect(() =>
+      validarBase({ entryPoint: 'TRADICIONAL', sesionCajaActivaId: undefined, sesionDestinoId: undefined })
+    ).toThrow(/sesionDestinoId/i)
+  })
+
+  it('TRADICIONAL + array SOLO con BANCO/TESORERIA_EFECTIVO (sin SESION_EFECTIVO): sesionDestinoId NO requerido', () => {
+    expect(() =>
+      validarBase({
+        entryPoint: 'TRADICIONAL',
+        modalidad: 'REFUND_TESORERIA',
+        origenDinero: [asignacion({ tipo: 'TESORERIA_EFECTIVO', cuentaId: 'caja-fuerte-1' })],
       })
     ).not.toThrow()
   })
 })
 
-describe('crearNotaCredito — Slice 2 (decouple: origenDinero desacopla la CUENTA del ambito de emision, drop same-session-as-sale)', () => {
+describe('crearNotaCredito — Slice 2 REWORK (origenDinero array, Design §Decision 5): desacopla la CUENTA del ambito de emision, drop same-session-as-sale', () => {
   function fixturesConPagos(overrides: Partial<NcrTxFixtures['venta']> = {}, pagos?: NcrTxFixtures['pagos']) {
     return {
       venta: {
@@ -595,9 +665,20 @@ describe('crearNotaCredito — Slice 2 (decouple: origenDinero desacopla la CUEN
     }
   }
 
-  const origenSesionActiva: OrigenDinero = { tipo: 'SESION_EFECTIVO', cuentaId: 'sesion-activa-1' }
+  // NOTA (Slice 2 REWORK, deviation report): el WRITE branch de la Regla de
+  // Oro (paso 6c) NO se toca en este slice — sigue iterando `pagos`
+  // originales y escribiendo un egreso por cada uno (comportamiento Slice
+  // 1/2 sin cambios). El array `origenDinero` solo aporta, en este slice,
+  // la CUENTA (`sesion_caja_id`) que se estampa en cada egreso — resuelta
+  // como la PRIMERA asignacion `SESION_EFECTIVO` del array (`cuentaId`,
+  // hoy todavia una sesion, NO un metodo_cobro.id real — esa reinterpretacion
+  // de Decision 5 recien se materializa en el two-pass write de Slice 3a,
+  // que reemplaza por completo este loop). Un array con una sola asignacion
+  // `SESION_EFECTIVO` es, por tanto, el equivalente exacto del objeto unico
+  // pre-rework para todo lo que este slice ejercita.
+  const origenSesionActiva: OrigenDinero = { tipo: 'SESION_EFECTIVO', cuentaId: 'sesion-activa-1', monto: '30.00' }
 
-  it('POS + origenDinero apunta a la propia sesion activa: inserta EGRESO en movimientos_metodo_cobro (origen NCR) con ese sesion_caja_id', async () => {
+  it('POS + origenDinero (array de 1 asignacion SESION_EFECTIVO) apunta a la propia sesion activa: inserta EGRESO en movimientos_metodo_cobro (origen NCR) con ese sesion_caja_id', async () => {
     const calls = mockCrearNcrTx(
       fixturesConPagos({ sesion_caja_id: 'sesion-activa-1' }, [
         { id: 'pago-1', metodo_cobro_id: 'metodo-efectivo', monto: '30.00', moneda_id: 'usd-id' },
@@ -609,7 +690,7 @@ describe('crearNotaCredito — Slice 2 (decouple: origenDinero desacopla la CUEN
         entryPoint: 'POS',
         sesionCajaActivaId: 'sesion-activa-1',
         modalidad: 'EFECTIVO_REAL',
-        origenDinero: origenSesionActiva,
+        origenDinero: [origenSesionActiva],
       })
     )
 
@@ -642,7 +723,7 @@ describe('crearNotaCredito — Slice 2 (decouple: origenDinero desacopla la CUEN
         entryPoint: 'POS',
         sesionCajaActivaId: 'sesion-activa-1',
         modalidad: 'EFECTIVO_REAL',
-        origenDinero: origenSesionActiva,
+        origenDinero: [origenSesionActiva],
       })
     )
 
@@ -653,7 +734,7 @@ describe('crearNotaCredito — Slice 2 (decouple: origenDinero desacopla la CUEN
     expect(egresoInsert!.params).toContain('sesion-activa-1')
   })
 
-  it('Decision 4 — Tradicional con origenDinero apuntando a una sesion DISTINTA a la de emision: SI inserta egreso en esa sesion (divergencia emision!=dinero intencional, obs #2938), y notas_credito.sesion_caja_id (emision) queda NULL', async () => {
+  it('Decision 4/5 — Tradicional con origenDinero apuntando a una sesion DISTINTA a la de emision (+ sesionDestinoId, exigido por Rule 6): SI inserta egreso en esa sesion (divergencia emision!=dinero intencional, obs #2938), y notas_credito.sesion_caja_id (emision) queda NULL', async () => {
     const calls = mockCrearNcrTx(
       fixturesConPagos({ sesion_caja_id: null }, [
         { id: 'pago-1', metodo_cobro_id: 'metodo-efectivo', monto: '30.00', moneda_id: 'usd-id' },
@@ -664,7 +745,8 @@ describe('crearNotaCredito — Slice 2 (decouple: origenDinero desacopla la CUEN
       baseParams({
         entryPoint: 'TRADICIONAL',
         modalidad: 'EFECTIVO_REAL',
-        origenDinero: { tipo: 'SESION_EFECTIVO', cuentaId: 'sesion-B-de-otro-cajero' },
+        sesionDestinoId: 'sesion-B-de-otro-cajero',
+        origenDinero: [{ tipo: 'SESION_EFECTIVO', cuentaId: 'sesion-B-de-otro-cajero', monto: '30.00' }],
       })
     )
 
@@ -693,7 +775,7 @@ describe('crearNotaCredito — Slice 2 (decouple: origenDinero desacopla la CUEN
     expect(egresoInsert).toBeUndefined()
   })
 
-  it('multiples metodos de pago: inserta UN egreso POR metodo (per-method), cada uno con su metodo_cobro_id y monto nativo', async () => {
+  it('multiples metodos de pago originales: inserta UN egreso POR metodo (per-method), cada uno con su metodo_cobro_id y monto nativo — sin relacion con el tamano del array origenDinero (axis independiente, obs #2948)', async () => {
     const calls = mockCrearNcrTx(
       fixturesConPagos({ sesion_caja_id: 'sesion-activa-1' }, [
         { id: 'pago-1', metodo_cobro_id: 'metodo-efectivo', monto: '10.00', moneda_id: 'usd-id' },
@@ -706,7 +788,7 @@ describe('crearNotaCredito — Slice 2 (decouple: origenDinero desacopla la CUEN
         entryPoint: 'POS',
         sesionCajaActivaId: 'sesion-activa-1',
         modalidad: 'EFECTIVO_REAL',
-        origenDinero: origenSesionActiva,
+        origenDinero: [origenSesionActiva],
       })
     )
 
@@ -716,6 +798,32 @@ describe('crearNotaCredito — Slice 2 (decouple: origenDinero desacopla la CUEN
     expect(egresos).toHaveLength(2)
     expect(egresos.some((c) => c.params.includes('metodo-efectivo') && c.params.includes('10.00'))).toBe(true)
     expect(egresos.some((c) => c.params.includes('metodo-tarjeta') && c.params.includes('800.00'))).toBe(true)
+  })
+
+  it('array con MULTIPLES asignaciones incluyendo SESION_EFECTIVO: usa la PRIMERA asignacion SESION_EFECTIVO del array como sesion_caja_id del egreso (comportamiento MINIMO de Slice 2 — el two-pass write real multi-cuenta es Slice 3a)', async () => {
+    const calls = mockCrearNcrTx(
+      fixturesConPagos({ sesion_caja_id: 'sesion-activa-1' }, [
+        { id: 'pago-1', metodo_cobro_id: 'metodo-efectivo', monto: '30.00', moneda_id: 'usd-id' },
+      ])
+    )
+
+    await crearNotaCredito(
+      baseParams({
+        entryPoint: 'POS',
+        sesionCajaActivaId: 'sesion-activa-1',
+        modalidad: 'EFECTIVO_REAL',
+        origenDinero: [
+          { tipo: 'SESION_EFECTIVO', cuentaId: 'sesion-activa-1', monto: '30.00' },
+          { tipo: 'BANCO', cuentaId: 'banco-1', monto: '0.01' },
+        ],
+      })
+    )
+
+    const egresoInsert = calls.find(
+      (c) => c.sql.startsWith('INSERT INTO movimientos_metodo_cobro') && c.sql.includes("'NCR'")
+    )
+    expect(egresoInsert).toBeDefined()
+    expect(egresoInsert!.params).toContain('sesion-activa-1')
   })
 
   it('marca is_reversed=1 para los pagos no reversados de la venta (NC tipo TOTAL)', async () => {
@@ -730,7 +838,7 @@ describe('crearNotaCredito — Slice 2 (decouple: origenDinero desacopla la CUEN
         entryPoint: 'POS',
         sesionCajaActivaId: 'sesion-activa-1',
         modalidad: 'EFECTIVO_REAL',
-        origenDinero: origenSesionActiva,
+        origenDinero: [origenSesionActiva],
       })
     )
 
@@ -747,7 +855,7 @@ describe('crearNotaCredito — Slice 2 (decouple: origenDinero desacopla la CUEN
         entryPoint: 'POS',
         sesionCajaActivaId: 'sesion-activa-1',
         modalidad: 'EFECTIVO_REAL',
-        origenDinero: origenSesionActiva,
+        origenDinero: [origenSesionActiva],
       })
     )
 
@@ -829,12 +937,17 @@ describe('crearNotaCredito — Slice 3 (modalidades de liquidacion + gate anti-f
     expect(mockedDb.writeTransaction).not.toHaveBeenCalled()
   })
 
-  it('crearNotaCredito: REFUND_TESORERIA rechaza como "no implementado" (Slice 6), sin abrir transaccion', async () => {
+  it('crearNotaCredito: REFUND_TESORERIA rechaza como "no implementado" (Slice 3a/3b), sin abrir transaccion — origenDinero valido (array no vacio, Rule 1) para llegar a este throw y no al de validarOrigenDinero', async () => {
     mockCrearNcrTx(fixturesModalidad())
 
-    await expect(crearNotaCredito(baseParams({ modalidad: 'REFUND_TESORERIA' }))).rejects.toThrow(
-      /no esta implementado/i
-    )
+    await expect(
+      crearNotaCredito(
+        baseParams({
+          modalidad: 'REFUND_TESORERIA',
+          origenDinero: [{ tipo: 'BANCO', cuentaId: 'banco-1', monto: '30.00' }],
+        })
+      )
+    ).rejects.toThrow(/no esta implementado/i)
 
     expect(mockedDb.writeTransaction).not.toHaveBeenCalled()
   })
