@@ -1240,7 +1240,7 @@ export function ProductoForm({ isOpen, onClose, producto }: ProductoFormProps) {
         {/* ============================================================
             TABS NAV
         ============================================================ */}
-        <div className="flex-none bg-white border-b border-gray-200 px-6">
+        <div className="flex-none bg-white border-b border-gray-200 px-6 overflow-x-auto">
           <div className="flex -mb-px">
             {tabs.map((tab) => (
               <button
