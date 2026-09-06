@@ -265,13 +265,17 @@ export function CrearNcrModal({ isOpen, onClose, factura }: CrearNcrModalProps) 
         // la sesion de caja activa (factura potencialmente historica, ni idea
         // de que sesion este abierta ahora). Ver Regla de Oro, obs #2804.
         entryPoint: 'TRADICIONAL',
-        // Slice 4 (FLIP — Design §Decision 5): "Devolver dinero" ya NO es un
-        // placeholder — dispara la modalidad EFECTIVO_REAL real, con el
-        // array `origenDinero` resuelto por el picker multi-cuenta y la
-        // `sesionDestinoId` elegida (empresa-wide, Decision 4). "Credito a
-        // favor" (default) sigue siendo AJUSTE_CXC, comportamiento
-        // preservado byte-a-byte.
-        modalidad: dispararDesembolso ? 'EFECTIVO_REAL' : 'AJUSTE_CXC',
+        // Slice 4 fix (obs #2954): "Devolver dinero" dispara REFUND_TESORERIA
+        // — la modalidad reservada a la ruta Tradicional (ver el comentario
+        // de `MODALIDADES_POS` en `nota-credito-pos-modal.tsx`, que excluye
+        // deliberadamente REFUND_TESORERIA del POS). El write core trata
+        // EFECTIVO_REAL/REFUND_TESORERIA identico (Design §Decision 5
+        // "Consequence") — la eleccion aqui solo fija el valor de auditoria
+        // `liquidacion_modalidad`, nunca que tipos de cuenta admite el array
+        // (`origenDinero` puede mezclar sesion+tesoreria+banco libremente
+        // con cualquiera de las dos). "Credito a favor" (default) sigue
+        // siendo AJUSTE_CXC, comportamiento preservado byte-a-byte.
+        modalidad: dispararDesembolso ? 'REFUND_TESORERIA' : 'AJUSTE_CXC',
         ...(dispararDesembolso
           ? {
               origenDinero: origenDineroResultado.origenDinero,

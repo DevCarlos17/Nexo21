@@ -1430,19 +1430,91 @@ describe('crearNotaCredito — Slice 3 (modalidades de liquidacion + gate anti-f
     expect(mockedDb.writeTransaction).not.toHaveBeenCalled()
   })
 
-  it('crearNotaCredito: REFUND_TESORERIA rechaza como "no implementado" (Slice 3a/3b), sin abrir transaccion — origenDinero valido (array no vacio, Rule 1) para llegar a este throw y no al de validarOrigenDinero', async () => {
-    mockCrearNcrTx(fixturesModalidad())
+  it('crearNotaCredito: REFUND_TESORERIA ya NO es un throw fantasma — llega al mismo write core que EFECTIVO_REAL y escribe el egreso de banco end-to-end (retiro del guard obsoleto, obs #2954)', async () => {
+    const calls = mockCrearNcrTx({
+      ...fixturesModalidad({ sesion_caja_id: null }),
+      cuentas: { 'banco-1': { saldo_actual: '1000.00000000', moneda_codigo: 'USD' } },
+    })
 
     await expect(
       crearNotaCredito(
         baseParams({
+          entryPoint: 'TRADICIONAL',
           modalidad: 'REFUND_TESORERIA',
           origenDinero: [{ tipo: 'BANCO', cuentaId: 'banco-1', monto: '30.00' }],
         })
       )
-    ).rejects.toThrow(/no esta implementado/i)
+    ).resolves.toMatchObject({ ncrId: expect.any(String), nroNcr: expect.any(String) })
 
-    expect(mockedDb.writeTransaction).not.toHaveBeenCalled()
+    expect(mockedDb.writeTransaction).toHaveBeenCalledTimes(1)
+
+    const egresoBanco = calls.find((c) => c.sql.startsWith('INSERT INTO movimientos_bancarios'))
+    expect(egresoBanco).toBeDefined()
+    expect(egresoBanco!.sql).toContain('REFUND_NCR')
+    expect(egresoBanco!.params).toContain('30.00000000')
+    expect(egresoBanco!.params).toContain('banco-1')
+
+    const ncrInsert = calls.find((c) => c.sql.startsWith('INSERT INTO notas_credito'))
+    const ncrId = ncrInsert!.params[0] as string
+    // doc_origen_id del egreso apunta al id de la NC recien creada.
+    expect(egresoBanco!.params).toContain(ncrId)
+    // liquidacion_modalidad persistida es REFUND_TESORERIA verbatim (ultimos 2 params).
+    expect(ncrInsert!.params[ncrInsert!.params.length - 2]).toBe('REFUND_TESORERIA')
+
+    const updateBanco = calls.find((c) => c.sql.startsWith('UPDATE bancos_empresa SET saldo_actual'))
+    expect(updateBanco).toBeDefined()
+    expect(updateBanco!.params).toContain('970.00000000') // 1000 - 30, saldo actualizado
+  })
+
+  it('crearNotaCredito: REFUND_TESORERIA con array MIXTO (SESION_EFECTIVO + BANCO, entryPoint TRADICIONAL con sesionDestinoId) escribe ambos egresos — misma forma que EFECTIVO_REAL (design.md: ambas modalidades son funcionalmente identicas al escribir, solo cambia el valor de auditoria)', async () => {
+    const calls = mockCrearNcrTx({
+      venta: {
+        id: 'venta-1',
+        cliente_id: 'cliente-1',
+        nro_factura: 'C01-000001',
+        tasa: '500',
+        total_usd: '2.00',
+        total_bs: '1000.00',
+        saldo_pend_usd: '0.00',
+        tipo: 'CONTADO',
+        status: 'ACTIVA',
+        deposito_id: 'dep-B',
+        sesion_caja_id: null,
+      },
+      ventaDet: [{ producto_id: 'prod-1', cantidad: '3.000', lote_id: null }],
+      productos: { 'prod-1': { tipo: 'P', stock: '20.000', nombre: 'Producto 1' } },
+      inventarioStock: { 'prod-1::dep-B': '10.000' },
+      pagos: [],
+      sesionesCaja: { 'sesion-b': { status: 'ABIERTA' } },
+      cuentas: {
+        'metodo-efectivo-bs': { saldo_actual: '5000.00000000', moneda_codigo: 'VES' },
+        'banco-1': { saldo_actual: '10000.00000000', moneda_codigo: 'VES' },
+      },
+    })
+
+    await crearNotaCredito(
+      baseParams({
+        entryPoint: 'TRADICIONAL',
+        sesionDestinoId: 'sesion-b',
+        modalidad: 'REFUND_TESORERIA',
+        origenDinero: [
+          { tipo: 'SESION_EFECTIVO', cuentaId: 'metodo-efectivo-bs', monto: '500' },
+          { tipo: 'BANCO', cuentaId: 'banco-1', monto: '500' },
+        ],
+      })
+    )
+
+    const egresoSesion = calls.find(
+      (c) => c.sql.startsWith('INSERT INTO movimientos_metodo_cobro') && c.sql.includes("'NCR'")
+    )
+    expect(egresoSesion).toBeDefined()
+    expect(egresoSesion!.params).toContain('500.00000000')
+    expect(egresoSesion!.params).toContain('sesion-b')
+
+    const egresoBanco = calls.find((c) => c.sql.startsWith('INSERT INTO movimientos_bancarios'))
+    expect(egresoBanco).toBeDefined()
+    expect(egresoBanco!.params).toContain('500.00000000')
+    expect(egresoBanco!.params).toContain('banco-1')
   })
 
   it('SALDO_FAVOR: inserta movimientos_cuenta tipo SAFC trazable a nota_credito_id, CERO escritura en movimientos_metodo_cobro', async () => {

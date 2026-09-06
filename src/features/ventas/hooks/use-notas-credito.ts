@@ -83,8 +83,14 @@ export interface PagoFacturaItem {
  * aqui porque el mismo campo `liquidacion_modalidad` la persiste (CHECK de
  * `migrations/0091_notas_credito_schema.sql` y Design §5 tabla de schema
  * listan 5 valores, no 4 — obs #2812, reconciliado en este slice).
- * `REFUND_TESORERIA` esta validado por el tipo pero NO implementado hasta
- * Slice 6 (throw explicito, ver `crearNotaCredito`).
+ * `REFUND_TESORERIA` comparte el MISMO write core que `EFECTIVO_REAL` desde
+ * el two-pass de Slice 3a/3b (Design §Decision 5 "Consequence": ambas son
+ * funcionalmente identicas al escribir — la diferencia es solo el valor
+ * persistido en `liquidacion_modalidad` para auditoria). Un throw fantasma
+ * que quedo del modelo pre-3a bloqueaba esta modalidad; retirado (obs
+ * #2954). Convencion de ruta: `nota-credito-pos-modal.tsx` (POS) siempre usa
+ * `EFECTIVO_REAL`; `crear-ncr-modal.tsx` (Tradicional) siempre usa
+ * `REFUND_TESORERIA` para un reintegro en efectivo/banco/tesoreria.
  */
 export type LiquidacionModalidad =
   | 'EFECTIVO_REAL'
@@ -259,8 +265,9 @@ export interface CrearNotaCreditoParams {
    * Ambito de emision (Regla de Oro, obs #2804): 'POS' = cajero dentro de su
    * sesion de caja activa (solo facturas de esa sesion). 'TRADICIONAL' =
    * modulo dedicado de NC, cualquier factura de la empresa, NUNCA toca el
-   * cajon fisico de una sesion activa sin egreso explicito (fuera de scope
-   * de este slice — ver REFUND_TESORERIA, Slice 6).
+   * cajon fisico de una sesion activa sin egreso explicito salvo que
+   * `origenDinero` lo pida (ver `REFUND_TESORERIA`, la modalidad reservada
+   * a esta ruta para reintegros de tesoreria/banco).
    */
   entryPoint: 'POS' | 'TRADICIONAL'
   /** Id de la sesion de caja activa del cajero — solo relevante cuando `entryPoint === 'POS'`. */
@@ -499,13 +506,6 @@ export async function crearNotaCredito(
   // igual que el gate anterior, se evalua ANTES de abrir la transaccion —
   // sin tocar la DB. Ver `validarOrigenDinero`.
   validarOrigenDinero({ modalidad, entryPoint, sesionCajaActivaId, sesionDestinoId, origenDinero })
-
-  // REFUND_TESORERIA ya valida su array (forma pura) pero el WRITE branch
-  // multi-cuenta recien se implementa en Slice 3a/3b (design.md Pass
-  // 1/Pass 2, two-pass sobre el array).
-  if (modalidad === 'REFUND_TESORERIA') {
-    throw new Error('REFUND_TESORERIA aun no esta implementado (ver Slice 3a/3b)')
-  }
 
   let ncrId = ''
   let nroNcr = ''

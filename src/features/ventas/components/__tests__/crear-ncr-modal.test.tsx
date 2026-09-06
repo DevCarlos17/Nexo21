@@ -266,7 +266,7 @@ describe('CrearNcrModal (ruta administrativa, Slice D) — sin PIN, reversa cual
     expect(screen.getByRole('button', { name: /Confirmar Anulacion/i })).toBeDisabled()
   })
 
-  it('Slice 4: completar el picker + elegir sesion destino habilita el submit y emite modalidad EFECTIVO_REAL con origenDinero y sesionDestinoId', async () => {
+  it('Slice 4 fix (obs #2954): completar el picker + elegir sesion destino habilita el submit y emite modalidad REFUND_TESORERIA (NO EFECTIVO_REAL — reservada al POS) con origenDinero y sesionDestinoId', async () => {
     const user = userEvent.setup()
     render(<CrearNcrModal isOpen onClose={() => {}} factura={baseFactura()} />)
 
@@ -279,7 +279,7 @@ describe('CrearNcrModal (ruta administrativa, Slice D) — sin PIN, reversa cual
     await waitFor(() => expect(mockedCrearNotaCredito).toHaveBeenCalledTimes(1))
     expect(mockedCrearNotaCredito.mock.calls[0][0]).toMatchObject({
       entryPoint: 'TRADICIONAL',
-      modalidad: 'EFECTIVO_REAL',
+      modalidad: 'REFUND_TESORERIA',
       sesionDestinoId: 'sesion-a',
       origenDinero: [{ tipo: 'SESION_EFECTIVO', cuentaId: 'metodo-usd-1', monto: '10' }],
     })
