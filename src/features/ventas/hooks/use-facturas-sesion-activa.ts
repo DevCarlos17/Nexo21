@@ -37,7 +37,8 @@ export function useFacturasSesionActiva() {
            c.nombre as cliente_nombre,
            c.identificacion as cliente_identificacion,
            EXISTS(SELECT 1 FROM notas_credito nc WHERE nc.venta_id = v.id AND nc.tipo = 'TOTAL')   as tiene_reverso_total,
-           EXISTS(SELECT 1 FROM notas_credito nc WHERE nc.venta_id = v.id AND nc.tipo = 'PARCIAL') as tiene_reverso_parcial
+           EXISTS(SELECT 1 FROM notas_credito nc WHERE nc.venta_id = v.id AND nc.tipo = 'PARCIAL') as tiene_reverso_parcial,
+           EXISTS(SELECT 1 FROM notas_credito nc WHERE nc.venta_id = v.id AND nc.entry_point = 'TRADICIONAL') as tiene_reverso_via_administracion
          FROM ventas v
          JOIN clientes c ON v.cliente_id = c.id
          WHERE v.empresa_id = ? AND v.sesion_caja_id = ?

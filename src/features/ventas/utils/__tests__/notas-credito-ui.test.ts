@@ -11,6 +11,7 @@ import {
   calcularBadgesReversoPorVenta,
   resolverBadgesFactura,
   filaFacturaAtenuada,
+  debeMostrarBadgeAdministracion,
 } from '../notas-credito-ui'
 
 // ─── derivarEstadoPago (Design §Decision 4 — tabla de verdad Contado/Credito/Abonada) ────────
@@ -467,5 +468,21 @@ describe('filaFacturaAtenuada (Slice E.5: fila 100% reversada se atenua en la ta
 
   it('tiene_reverso_total ausente (undefined) -> false, nunca revienta', () => {
     expect(filaFacturaAtenuada({})).toBe(false)
+  })
+})
+
+// ─── debeMostrarBadgeAdministracion (Slice 6, Design §Decision 3: badge "vía administración") ────────
+
+describe('debeMostrarBadgeAdministracion (Slice 6: badge "vía administración" en el listado POS cuando la NC vino de Tradicional)', () => {
+  it('tiene_reverso_via_administracion=1 -> true (la venta tiene una NC con entry_point=TRADICIONAL)', () => {
+    expect(debeMostrarBadgeAdministracion({ tiene_reverso_via_administracion: 1 })).toBe(true)
+  })
+
+  it('tiene_reverso_via_administracion=0 -> false (ninguna NC de esta venta vino de Tradicional)', () => {
+    expect(debeMostrarBadgeAdministracion({ tiene_reverso_via_administracion: 0 })).toBe(false)
+  })
+
+  it('tiene_reverso_via_administracion ausente (undefined) -> false, nunca revienta', () => {
+    expect(debeMostrarBadgeAdministracion({})).toBe(false)
   })
 })

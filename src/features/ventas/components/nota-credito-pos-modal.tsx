@@ -21,6 +21,7 @@ import {
   calcularReversoPorLinea,
   agruparReversosPorNc,
   resolverBadgesFactura,
+  debeMostrarBadgeAdministracion,
   type EstadoPago,
   type BadgeReverso,
 } from '../utils/notas-credito-ui'
@@ -128,6 +129,11 @@ function FacturaBadges({ f, badgeReverso }: { f: FacturaParaAnular; badgeReverso
       {badges.reverso === 'PARCIAL' && (
         <Badge variant="outline" className="border-orange-200 bg-orange-50 text-orange-700">
           Reverso Parcial
+        </Badge>
+      )}
+      {debeMostrarBadgeAdministracion(f) && (
+        <Badge variant="outline" className="border-slate-200 bg-slate-50 text-slate-700">
+          Vía administración
         </Badge>
       )}
     </div>

@@ -477,6 +477,21 @@ export function filaFacturaAtenuada(f: { tiene_reverso_total?: number }): boolea
   return f.tiene_reverso_total === 1
 }
 
+// =============================================
+// debeMostrarBadgeAdministracion — Slice 6 (Design §Decision 3)
+// =============================================
+
+/**
+ * Badge "Vía administración" en el listado POS-express (Design §Decision 3:
+ * `entry_point` persiste el origen de emision de la NC — 'POS' | 'TRADICIONAL').
+ * Cuando la venta activa fue reversada por una NC emitida desde el modulo
+ * Tradicional (admin), el cajero POS debe ver esta señal — el reintegro pudo
+ * afectar una sesion distinta a la suya. `undefined`/`0` -> no renderiza.
+ */
+export function debeMostrarBadgeAdministracion(f: { tiene_reverso_via_administracion?: number }): boolean {
+  return f.tiene_reverso_via_administracion === 1
+}
+
 export function agruparReversosPorNc(rows: ReversoFacturaRowInput[]): ReversoAplicado[] {
   const porId = new Map<string, ReversoAplicado>()
   for (const row of rows) {

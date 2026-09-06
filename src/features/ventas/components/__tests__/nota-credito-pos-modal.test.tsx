@@ -218,6 +218,24 @@ describe('NotaCreditoPosModal — Slice 5a-2a (entrada POS, PIN A, TOTAL only, s
     expect(mockedUseFacturasSesionActiva).toHaveBeenCalled()
   })
 
+  it('Slice 6: una factura con tiene_reverso_via_administracion=1 muestra el badge "Vía administración"', () => {
+    setup({ hasPermission: true })
+    mockedUseFacturasSesionActiva.mockReturnValue({
+      facturas: [facturaSesion({ tiene_reverso_via_administracion: 1 })],
+      isLoading: false,
+    })
+    render(<NotaCreditoPosModal isOpen onClose={() => {}} sesion={sesionActiva} />)
+
+    expect(screen.getByText('Vía administración')).toBeInTheDocument()
+  })
+
+  it('Slice 6: una factura sin tiene_reverso_via_administracion NO muestra el badge "Vía administración"', () => {
+    setup({ hasPermission: true })
+    render(<NotaCreditoPosModal isOpen onClose={() => {}} sesion={sesionActiva} />)
+
+    expect(screen.queryByText('Vía administración')).not.toBeInTheDocument()
+  })
+
   it('con permiso ventas.nota_credito: confirmar emite directo, SIN pedir PIN', async () => {
     setup({ hasPermission: true })
     render(<NotaCreditoPosModal isOpen onClose={() => {}} sesion={sesionActiva} />)

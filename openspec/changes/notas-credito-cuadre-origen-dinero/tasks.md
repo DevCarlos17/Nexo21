@@ -124,6 +124,6 @@ Only the tracker merges to `develop` (opened draft/no-merge from the start). Eac
 
 ## Phase 6: Badge (Slice 6) — unchanged
 
-- [ ] 6.1 RED: POS facturas list shows "vía administración" badge when `entry_point==='TRADICIONAL'`, none when `'POS'`.
-- [ ] 6.2 GREEN: add the badge, keyed off `entry_point`.
-- [ ] 6.3 Verify green. Push `ncr-cuadre-06-badge`, open PR #6 → base `05-cuadre`. Merge tracker → `develop` only after all 6 child PRs are merged in order.
+- [x] 6.1 RED: POS facturas list shows "vía administración" badge when `entry_point==='TRADICIONAL'`, none when `'POS'`. Implemented as `useFacturasSesionActiva`'s query gaining `tiene_reverso_via_administracion` (EXISTS over `notas_credito` with `entry_point='TRADICIONAL'`), consumed by `nota-credito-pos-modal.tsx`'s `FacturaBadges` (the only consumer of that hook — the POS-express facturas list).
+- [x] 6.2 GREEN: add the badge, keyed off `entry_point`. Pure predicate `debeMostrarBadgeAdministracion` in `notas-credito-ui.ts`; badge label "Vía administración" (slate outline, matching the neutral tone of the other badges).
+- [x] 6.3 Verify green locally (executor scope — NOT pushed, no PR/merge; see apply-progress).

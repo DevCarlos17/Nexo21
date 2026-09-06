@@ -59,6 +59,8 @@ export interface FacturaParaAnular {
   tiene_reverso_parcial?: number
   /** Presente solo en filas de `useFacturasSesionActiva` (Slice 3a) — alimenta `igtfUsd` de `buildReciboData` en el panel de detalle. */
   total_igtf_usd?: string
+  /** Presente solo en filas de `useFacturasSesionActiva` (Slice 6, Design §Decision 3): 1 si existe una NC con `entry_point='TRADICIONAL'` asociada a esta venta — alimenta el badge "Vía administración". */
+  tiene_reverso_via_administracion?: number
 }
 
 export interface DetalleFacturaItem {

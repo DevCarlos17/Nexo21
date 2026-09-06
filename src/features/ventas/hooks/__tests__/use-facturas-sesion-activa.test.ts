@@ -145,6 +145,36 @@ describe('useFacturasSesionActiva — Slice 5a-2a (Spec notas-credito-pos: alcan
 
     expect(result.current.facturas[0]).toMatchObject({ tiene_reverso_total: 0, tiene_reverso_parcial: 0 })
   })
+
+  it('Slice 6 (badge "vía administración"): agrega tiene_reverso_via_administracion (EXISTS sobre notas_credito con entry_point=TRADICIONAL) al SELECT', () => {
+    setup({ sesionId: 'sesion-1', rows: [] })
+
+    renderHook(() => useFacturasSesionActiva())
+
+    const [sql] = mockedUseQuery.mock.calls[0]
+    expect(sql).toContain('tiene_reverso_via_administracion')
+    expect(sql).toContain("nc.entry_point = 'TRADICIONAL'")
+  })
+
+  it('Slice 6: venta con una NC entry_point=TRADICIONAL -> tiene_reverso_via_administracion=1 en la fila retornada', () => {
+    setup({
+      sesionId: 'sesion-1',
+      rows: [
+        {
+          id: 'venta-4',
+          nro_factura: 'C01-000004',
+          status: null,
+          tiene_reverso_total: 1,
+          tiene_reverso_parcial: 0,
+          tiene_reverso_via_administracion: 1,
+        },
+      ],
+    })
+
+    const { result } = renderHook(() => useFacturasSesionActiva())
+
+    expect(result.current.facturas[0]).toMatchObject({ tiene_reverso_via_administracion: 1 })
+  })
 })
 
 describe('useBadgesReversoSesion (Slice 5e QA fix 3.5: badge de reverso acumulado por venta_id de la sesion activa)', () => {
