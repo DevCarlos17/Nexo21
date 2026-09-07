@@ -314,7 +314,21 @@ export function sumarAbonos(pagos: ReciboPagoLinea[]): { usd: number; bs: number
 export interface FilaTotal {
   label: string
   monto: string
+  /**
+   * Monto en Bs formateado (`formatBs`), SOLO cuando `monto` no lo incluye ya.
+   * `null` en filas finales (`formatMontoBimonetario`, ya bimonetario) o
+   * cuando `monedaPresentacion='BS'` (Bs ya es la moneda primaria de `monto`).
+   * F3 QA fix (Slice 5b): `FacturaDetallePanel` (pantalla, sin restriccion de
+   * ancho) SIEMPRE muestra Bs junto a cada concepto fiscal usando este campo;
+   * el recibo impreso (thermal 32 chars) sigue usando solo `monto`.
+   */
+  montoBs: string | null
   bold: boolean
+}
+
+/** Bs secundario para filas intermedias: solo aporta info nueva cuando el primario es USD. */
+function montoBsSecundario(bs: number, monedaPresentacion: MonedaPresentacion): string | null {
+  return monedaPresentacion === 'USD' ? formatBs(bs) : null
 }
 
 /**
@@ -336,6 +350,7 @@ export function construirFilasTotales(totales: ReciboTotales, monedaPresentacion
     filas.push({
       label: 'Monto Exento',
       monto: formatMontoPrimario(totales.montoExentoUsd, totales.montoExentoBs, monedaPresentacion),
+      montoBs: montoBsSecundario(totales.montoExentoBs, monedaPresentacion),
       bold: false,
     })
   }
@@ -343,6 +358,7 @@ export function construirFilasTotales(totales: ReciboTotales, monedaPresentacion
     filas.push({
       label: 'Base Imponible',
       monto: formatMontoPrimario(totales.baseImponibleUsd, totales.baseImponibleBs, monedaPresentacion),
+      montoBs: montoBsSecundario(totales.baseImponibleBs, monedaPresentacion),
       bold: false,
     })
   }
@@ -350,6 +366,7 @@ export function construirFilasTotales(totales: ReciboTotales, monedaPresentacion
     filas.push({
       label: `IVA ${alicuota.pct}%`,
       monto: formatMontoPrimario(alicuota.ivaUsd, alicuota.ivaBs, monedaPresentacion),
+      montoBs: montoBsSecundario(alicuota.ivaBs, monedaPresentacion),
       bold: false,
     })
   }
@@ -359,22 +376,26 @@ export function construirFilasTotales(totales: ReciboTotales, monedaPresentacion
     filas.push({
       label: 'TOTAL FACTURA',
       monto: formatMontoBimonetario(totales.totalFacturaUsd, totales.totalFacturaBs, monedaPresentacion),
+      montoBs: null,
       bold: false,
     })
     filas.push({
       label: 'IGTF',
       monto: formatMontoPrimario(igtf, totales.igtfBs ?? 0, monedaPresentacion),
+      montoBs: montoBsSecundario(totales.igtfBs ?? 0, monedaPresentacion),
       bold: false,
     })
     filas.push({
       label: 'TOTAL + IGTF',
       monto: formatMontoBimonetario(totales.totalGeneralUsd, totales.totalGeneralBs, monedaPresentacion),
+      montoBs: null,
       bold: true,
     })
   } else {
     filas.push({
       label: 'TOTAL FACTURA',
       monto: formatMontoBimonetario(totales.totalFacturaUsd, totales.totalFacturaBs, monedaPresentacion),
+      montoBs: null,
       bold: true,
     })
   }

@@ -171,6 +171,10 @@ export interface DetalleFacturaCxc {
   producto_codigo: string
   tipo_impuesto: string
   impuesto_pct: string
+  /** `unidades.es_decimal` del producto (PowerSync boolean-as-integer). `null` si el producto no tiene unidad_base_id. */
+  es_decimal: number | null
+  /** `precio_unitario_usd` convertido a Bs con la tasa HISTORICA de la venta (`v.tasa`), no la tasa vigente. */
+  precio_unitario_bs: string
 }
 
 export interface PagoFacturaCxc {
@@ -229,14 +233,42 @@ export function useDetalleFactura(ventaId: string | null) {
     ventaId
       ? `SELECT vd.id, vd.venta_id, vd.producto_id, vd.cantidad, vd.precio_unitario_usd, vd.subtotal_usd, vd.subtotal_bs,
            vd.tipo_impuesto, vd.impuesto_pct,
-           p.nombre as producto_nombre, p.codigo as producto_codigo
+           p.nombre as producto_nombre, p.codigo as producto_codigo,
+           u.es_decimal,
+           ROUND(CAST(vd.precio_unitario_usd AS REAL) * CAST(v.tasa AS REAL), 2) as precio_unitario_bs
          FROM ventas_det vd
          JOIN productos p ON vd.producto_id = p.id
+         JOIN ventas v ON vd.venta_id = v.id
+         LEFT JOIN unidades u ON p.unidad_base_id = u.id
          WHERE vd.venta_id = ?`
       : '',
     ventaId ? [ventaId] : []
   )
   return { detalle: (data ?? []) as DetalleFacturaCxc[], isLoading }
+}
+
+interface AfectacionCxcRow {
+  n: number
+}
+
+/**
+ * Fuente correcta y persistida de "afectacion a CxC" de una factura (Design
+ * §Decision 6, openspec/changes/notas-credito-ui-pos): COUNT(*) de
+ * `movimientos_cuenta WHERE venta_id = ?`. NUNCA `construirCierreRecibo`/
+ * `discrepancy` de `recibo-pagos.ts` — ese estado es efimero de React
+ * (calculado en el momento del cobro, nunca persistido) e irrecuperable
+ * para facturas historicas. El llamador deriva el booleano final via
+ * `huboAfectacionCxc(cantidadMovimientos)` (notas-credito-ui.ts).
+ */
+export function useAfectacionCxc(ventaId: string | null, empresaId: string) {
+  const { data, isLoading } = useQuery(
+    ventaId && empresaId
+      ? 'SELECT COUNT(*) as n FROM movimientos_cuenta WHERE venta_id = ? AND empresa_id = ?'
+      : '',
+    ventaId && empresaId ? [ventaId, empresaId] : []
+  )
+  const row = (data?.[0] as AfectacionCxcRow | undefined) ?? null
+  return { cantidadMovimientos: row?.n ?? 0, isLoading }
 }
 
 interface VentaFechaRow {

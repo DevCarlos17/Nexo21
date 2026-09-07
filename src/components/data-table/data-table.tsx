@@ -26,7 +26,9 @@ interface DataTableProps<TData, TValue> {
   isLoading?: boolean
   onRowClick?: (row: TData) => void
   emptyMessage?: string
-  rowClassName?: string
+  rowClassName?: string | ((row: TData) => string | undefined)
+  /** Atributos HTML extra por fila (p.ej. `data-*` para marcadores semanticos no acoplados a CSS). */
+  rowProps?: (row: TData) => Record<string, string>
   containerClassName?: string
   searchKey?: string
   searchPlaceholder?: string
@@ -51,6 +53,7 @@ export function DataTable<TData, TValue>({
   onRowClick,
   emptyMessage = 'No se encontraron resultados.',
   rowClassName,
+  rowProps,
   containerClassName,
   searchKey,
   searchPlaceholder,
@@ -121,9 +124,10 @@ export function DataTable<TData, TValue>({
                   data-state={row.getIsSelected() && 'selected'}
                   className={cn(
                     'cursor-pointer transition-colors hover:bg-muted/40',
-                    rowClassName
+                    typeof rowClassName === 'function' ? rowClassName(row.original) : rowClassName
                   )}
                   onClick={() => onRowClick?.(row.original)}
+                  {...rowProps?.(row.original)}
                 >
                   {row.getVisibleCells().map((cell) => (
                     <TableCell

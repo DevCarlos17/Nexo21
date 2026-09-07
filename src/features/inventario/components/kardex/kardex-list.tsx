@@ -92,8 +92,13 @@ export function KardexList() {
       EXTRAVIO:        { label: 'Extravío',        className: 'bg-red-50 text-red-700 ring-red-600/20' },
       CONSUMO_INTERNO: { label: 'Consumo Interno', className: 'bg-blue-50 text-blue-700 ring-blue-600/20' },
       FACTURACION:     { label: 'Facturación',     className: 'bg-purple-50 text-purple-700 ring-purple-600/20' },
+      // F4 QA fix (Slice 5c, DISPLAY-ONLY): `crearNotaCredito` ya inserta
+      // `origen:'NCR'` en `movimientos_inventario` (reintegro de stock) —
+      // faltaba el mapeo de presentacion, por lo que la columna "Causa"
+      // caia al fallback "—" en vez de mostrar una etiqueta legible.
+      NOTA_CREDITO:    { label: 'Nota de crédito', className: 'bg-pink-50 text-pink-700 ring-pink-600/20' },
     }
-    const key = tipoSalida ?? (origen === 'VEN' ? 'FACTURACION' : null)
+    const key = tipoSalida ?? (origen === 'VEN' ? 'FACTURACION' : origen === 'NCR' ? 'NOTA_CREDITO' : null)
     if (!key) return null
     const cfg = map[key]
     if (!cfg) return <span className="text-xs text-muted-foreground">{key}</span>

@@ -27,7 +27,7 @@ import { Route as AppCitasIndexRouteImport } from './routes/_app/citas/index'
 import { Route as AppVentasReportesRouteImport } from './routes/_app/ventas/reportes'
 import { Route as AppVentasPrestamosRouteImport } from './routes/_app/ventas/prestamos'
 import { Route as AppVentasNuevaRouteImport } from './routes/_app/ventas/nueva'
-import { Route as AppVentasNotasCreditoRouteImport } from './routes/_app/ventas/notas-credito'
+import { Route as AppVentasFacturasEmitidasRouteImport } from './routes/_app/ventas/facturas-emitidas'
 import { Route as AppVentasCuadreDeCajaRouteImport } from './routes/_app/ventas/cuadre-de-caja'
 import { Route as AppProveedoresGestionRouteImport } from './routes/_app/proveedores/gestion'
 import { Route as AppInventarioUnidadesRouteImport } from './routes/_app/inventario/unidades'
@@ -166,11 +166,12 @@ const AppVentasNuevaRoute = AppVentasNuevaRouteImport.update({
   path: '/ventas/nueva',
   getParentRoute: () => AppRouteRoute,
 } as any)
-const AppVentasNotasCreditoRoute = AppVentasNotasCreditoRouteImport.update({
-  id: '/ventas/notas-credito',
-  path: '/ventas/notas-credito',
-  getParentRoute: () => AppRouteRoute,
-} as any)
+const AppVentasFacturasEmitidasRoute =
+  AppVentasFacturasEmitidasRouteImport.update({
+    id: '/ventas/facturas-emitidas',
+    path: '/ventas/facturas-emitidas',
+    getParentRoute: () => AppRouteRoute,
+  } as any)
 const AppVentasCuadreDeCajaRoute = AppVentasCuadreDeCajaRouteImport.update({
   id: '/ventas/cuadre-de-caja',
   path: '/ventas/cuadre-de-caja',
@@ -492,7 +493,7 @@ export interface FileRoutesByFullPath {
   '/inventario/unidades': typeof AppInventarioUnidadesRoute
   '/proveedores/gestion': typeof AppProveedoresGestionRoute
   '/ventas/cuadre-de-caja': typeof AppVentasCuadreDeCajaRoute
-  '/ventas/notas-credito': typeof AppVentasNotasCreditoRoute
+  '/ventas/facturas-emitidas': typeof AppVentasFacturasEmitidasRoute
   '/ventas/nueva': typeof AppVentasNuevaRoute
   '/ventas/prestamos': typeof AppVentasPrestamosRoute
   '/ventas/reportes': typeof AppVentasReportesRoute
@@ -557,7 +558,7 @@ export interface FileRoutesByTo {
   '/inventario/unidades': typeof AppInventarioUnidadesRoute
   '/proveedores/gestion': typeof AppProveedoresGestionRoute
   '/ventas/cuadre-de-caja': typeof AppVentasCuadreDeCajaRoute
-  '/ventas/notas-credito': typeof AppVentasNotasCreditoRoute
+  '/ventas/facturas-emitidas': typeof AppVentasFacturasEmitidasRoute
   '/ventas/nueva': typeof AppVentasNuevaRoute
   '/ventas/prestamos': typeof AppVentasPrestamosRoute
   '/ventas/reportes': typeof AppVentasReportesRoute
@@ -628,7 +629,7 @@ export interface FileRoutesById {
   '/_app/inventario/unidades': typeof AppInventarioUnidadesRoute
   '/_app/proveedores/gestion': typeof AppProveedoresGestionRoute
   '/_app/ventas/cuadre-de-caja': typeof AppVentasCuadreDeCajaRoute
-  '/_app/ventas/notas-credito': typeof AppVentasNotasCreditoRoute
+  '/_app/ventas/facturas-emitidas': typeof AppVentasFacturasEmitidasRoute
   '/_app/ventas/nueva': typeof AppVentasNuevaRoute
   '/_app/ventas/prestamos': typeof AppVentasPrestamosRoute
   '/_app/ventas/reportes': typeof AppVentasReportesRoute
@@ -698,7 +699,7 @@ export interface FileRouteTypes {
     | '/inventario/unidades'
     | '/proveedores/gestion'
     | '/ventas/cuadre-de-caja'
-    | '/ventas/notas-credito'
+    | '/ventas/facturas-emitidas'
     | '/ventas/nueva'
     | '/ventas/prestamos'
     | '/ventas/reportes'
@@ -763,7 +764,7 @@ export interface FileRouteTypes {
     | '/inventario/unidades'
     | '/proveedores/gestion'
     | '/ventas/cuadre-de-caja'
-    | '/ventas/notas-credito'
+    | '/ventas/facturas-emitidas'
     | '/ventas/nueva'
     | '/ventas/prestamos'
     | '/ventas/reportes'
@@ -833,7 +834,7 @@ export interface FileRouteTypes {
     | '/_app/inventario/unidades'
     | '/_app/proveedores/gestion'
     | '/_app/ventas/cuadre-de-caja'
-    | '/_app/ventas/notas-credito'
+    | '/_app/ventas/facturas-emitidas'
     | '/_app/ventas/nueva'
     | '/_app/ventas/prestamos'
     | '/_app/ventas/reportes'
@@ -979,11 +980,11 @@ declare module '@tanstack/react-router' {
       preLoaderRoute: typeof AppVentasNuevaRouteImport
       parentRoute: typeof AppRouteRoute
     }
-    '/_app/ventas/notas-credito': {
-      id: '/_app/ventas/notas-credito'
-      path: '/ventas/notas-credito'
-      fullPath: '/ventas/notas-credito'
-      preLoaderRoute: typeof AppVentasNotasCreditoRouteImport
+    '/_app/ventas/facturas-emitidas': {
+      id: '/_app/ventas/facturas-emitidas'
+      path: '/ventas/facturas-emitidas'
+      fullPath: '/ventas/facturas-emitidas'
+      preLoaderRoute: typeof AppVentasFacturasEmitidasRouteImport
       parentRoute: typeof AppRouteRoute
     }
     '/_app/ventas/cuadre-de-caja': {
@@ -1450,7 +1451,7 @@ interface AppRouteRouteChildren {
   AppInventarioUnidadesRoute: typeof AppInventarioUnidadesRoute
   AppProveedoresGestionRoute: typeof AppProveedoresGestionRoute
   AppVentasCuadreDeCajaRoute: typeof AppVentasCuadreDeCajaRoute
-  AppVentasNotasCreditoRoute: typeof AppVentasNotasCreditoRoute
+  AppVentasFacturasEmitidasRoute: typeof AppVentasFacturasEmitidasRoute
   AppVentasNuevaRoute: typeof AppVentasNuevaRoute
   AppVentasPrestamosRoute: typeof AppVentasPrestamosRoute
   AppVentasReportesRoute: typeof AppVentasReportesRoute
@@ -1505,7 +1506,7 @@ const AppRouteRouteChildren: AppRouteRouteChildren = {
   AppInventarioUnidadesRoute: AppInventarioUnidadesRoute,
   AppProveedoresGestionRoute: AppProveedoresGestionRoute,
   AppVentasCuadreDeCajaRoute: AppVentasCuadreDeCajaRoute,
-  AppVentasNotasCreditoRoute: AppVentasNotasCreditoRoute,
+  AppVentasFacturasEmitidasRoute: AppVentasFacturasEmitidasRoute,
   AppVentasNuevaRoute: AppVentasNuevaRoute,
   AppVentasPrestamosRoute: AppVentasPrestamosRoute,
   AppVentasReportesRoute: AppVentasReportesRoute,

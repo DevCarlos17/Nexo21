@@ -4,7 +4,7 @@ import { RequirePermission } from '@/components/shared/require-permission'
 import { AccessDeniedPage } from '@/components/shared/access-denied-page'
 import { PERMISSIONS } from '@/core/hooks/use-permissions'
 
-export const Route = createFileRoute('/_app/ventas/notas-credito')({
+export const Route = createFileRoute('/_app/ventas/facturas-emitidas')({
   component: NotasCreditoPageRoute,
 })
 

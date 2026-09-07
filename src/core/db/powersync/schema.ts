@@ -769,6 +769,10 @@ const notas_credito = new Table(
     usuario_id: column.text,
     fecha: column.text,
     created_at: column.text,
+    created_by: column.text,
+    sesion_caja_id: column.text,
+    liquidacion_modalidad: column.text,
+    no_desembolso: column.integer,
   },
   { indexes: {} }
 )
@@ -788,6 +792,8 @@ const notas_credito_det = new Table(
     descripcion: column.text,
     lote_id: column.text,
     created_at: column.text,
+    venta_det_id: column.text,
+    subtotal_bs: column.text,
   },
   { indexes: {} }
 )

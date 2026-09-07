@@ -23,19 +23,31 @@ vi.mock('@/features/contabilidad/lib/generar-asientos', () => ({
   leerMonedaContable: vi.fn(async () => 'USD'),
 }))
 
+// `useDetalleFactura` usa `useQuery` de `@powersync/react` — mismo patron que
+// use-facturas-sesion-activa.test.ts / use-deuda-cliente.test.ts. Ninguna de
+// las funciones ya testeadas en este archivo (registrarSafExcedente,
+// aplicarSaldoFavor, registrarPagoFactura) llama useQuery, asi que mockear el
+// modulo completo aqui es seguro para el resto de la suite.
+vi.mock('@powersync/react', () => ({ useQuery: vi.fn() }))
+
 import type { Transaction } from '@powersync/common'
+import { renderHook } from '@testing-library/react'
+import { useQuery } from '@powersync/react'
 import { db } from '@/core/db/powersync/db'
 import { toStorageString } from '@/lib/currency'
 import {
   registrarSafExcedente,
   aplicarSaldoFavor,
   registrarPagoFactura,
+  useDetalleFactura,
+  useAfectacionCxc,
   type RegistrarSafExcedenteParams,
   type AplicarSaldoFavorParams,
   type PagoFacturaParams,
 } from '../use-cxc'
 
 const mockedDb = vi.mocked(db, true)
+const mockedUseQuery = vi.mocked(useQuery)
 
 interface Call {
   sql: string
@@ -294,5 +306,94 @@ describe('registrarPagoFactura — rama SAF inline: gate re-sourced a SUM(SAFC)-
     await expect(
       registrarPagoFactura(baseParams({ montoSaf: 50 }))
     ).rejects.toThrow(/excede el saldo disponible/i)
+  })
+})
+
+// ─────────────────────────────────────────────────────────────────────────
+// useDetalleFactura — extension aditiva (Design §Decision 3): es_decimal +
+// precio_unitario_bs, via JOIN a ventas (tasa historica) + unidades.
+// ─────────────────────────────────────────────────────────────────────────
+
+describe('useDetalleFactura — extension aditiva (Design §Decision 3)', () => {
+  it('agrega JOIN a ventas (tasa) y LEFT JOIN a unidades (es_decimal) al SQL, sin remover columnas existentes', () => {
+    mockedUseQuery.mockReturnValue({ data: [], isLoading: false } as never)
+
+    renderHook(() => useDetalleFactura('venta-1'))
+
+    const [sql, params] = mockedUseQuery.mock.calls[0]
+    expect(sql).toContain('es_decimal')
+    expect(sql).toContain('precio_unitario_bs')
+    expect(sql).toContain('JOIN ventas v ON vd.venta_id = v.id')
+    expect(sql).toContain('LEFT JOIN unidades u ON p.unidad_base_id = u.id')
+    // Columnas preexistentes (contrato de los 3 consumidores verificados) intactas:
+    expect(sql).toContain('vd.subtotal_usd')
+    expect(sql).toContain('vd.tipo_impuesto')
+    expect(sql).toContain('p.nombre as producto_nombre')
+    expect(params).toEqual(['venta-1'])
+  })
+
+  it('precio_unitario_bs se calcula con la tasa HISTORICA de la venta (v.tasa), nunca una tasa vigente', () => {
+    mockedUseQuery.mockReturnValue({
+      data: [
+        {
+          id: 'vd-1',
+          venta_id: 'venta-1',
+          producto_id: 'prod-1',
+          cantidad: '2',
+          precio_unitario_usd: '10.00',
+          subtotal_usd: '20.00',
+          subtotal_bs: '1000.00',
+          tipo_impuesto: 'Gravable',
+          impuesto_pct: '16',
+          producto_nombre: 'Producto Test',
+          producto_codigo: 'P001',
+          es_decimal: 0,
+          precio_unitario_bs: '500.00',
+        },
+      ],
+      isLoading: false,
+    } as never)
+
+    const { result } = renderHook(() => useDetalleFactura('venta-1'))
+
+    expect(result.current.detalle[0]).toMatchObject({ es_decimal: 0, precio_unitario_bs: '500.00' })
+  })
+})
+
+// ─────────────────────────────────────────────────────────────────────────
+// useAfectacionCxc — Design §Decision 6: fuente correcta de "afectacion CxC"
+// para el panel de detalle (Slice 3a). COUNT(*) sobre movimientos_cuenta,
+// NUNCA construirCierreRecibo/discrepancy (estado efimero de React).
+// ─────────────────────────────────────────────────────────────────────────
+
+describe('useAfectacionCxc (Design §Decision 6: COUNT movimientos_cuenta WHERE venta_id + empresa_id)', () => {
+  it('sin ventaId: no ejecuta la query (sql vacio) y retorna 0', () => {
+    mockedUseQuery.mockReturnValue({ data: [], isLoading: false } as never)
+
+    const { result } = renderHook(() => useAfectacionCxc(null, 'emp-1'))
+
+    expect(result.current.cantidadMovimientos).toBe(0)
+    expect(mockedUseQuery).toHaveBeenCalledWith('', [])
+  })
+
+  it('con ventaId: ejecuta COUNT escopeado a venta_id + empresa_id y retorna el conteo', () => {
+    mockedUseQuery.mockReturnValue({ data: [{ n: 2 }], isLoading: false } as never)
+
+    const { result } = renderHook(() => useAfectacionCxc('venta-1', 'emp-1'))
+
+    const [sql, params] = mockedUseQuery.mock.calls[0]
+    expect(sql).toContain('COUNT(*)')
+    expect(sql).toContain('FROM movimientos_cuenta')
+    expect(sql).toContain('WHERE venta_id = ? AND empresa_id = ?')
+    expect(params).toEqual(['venta-1', 'emp-1'])
+    expect(result.current.cantidadMovimientos).toBe(2)
+  })
+
+  it('0 movimientos: retorna cantidadMovimientos=0 (huboAfectacionCxc(0) sera false en el llamador)', () => {
+    mockedUseQuery.mockReturnValue({ data: [{ n: 0 }], isLoading: false } as never)
+
+    const { result } = renderHook(() => useAfectacionCxc('venta-2', 'emp-1'))
+
+    expect(result.current.cantidadMovimientos).toBe(0)
   })
 })

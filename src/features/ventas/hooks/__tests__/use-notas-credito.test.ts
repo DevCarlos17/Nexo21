@@ -8,7 +8,17 @@ vi.mock('@/core/db/powersync/db', () => ({
     writeTransaction: vi.fn(),
   },
 }))
+// F1 QA fix: `useReversosFactura` (nuevo hook, historial de NC por factura)
+// usa `useQuery` de `@powersync/react` — mismo patron aislado que
+// `use-facturas-sesion-activa.test.ts`. El resto de tests de este archivo
+// (crearNotaCredito, via writeTransaction) no se ven afectados: nunca llaman
+// a un hook basado en `useQuery`.
+vi.mock('@powersync/react', () => ({ useQuery: vi.fn() }))
 vi.mock('@/core/db/powersync/connector', () => ({ connector: {} }))
+// Slice B (notas-credito-ruta-administrativa): `useNotasCredito(filtros?)`
+// resuelve `empresaId` via `useCurrentUser()` — mismo patron de mock aislado
+// que `use-facturas-sesion-activa.test.ts`.
+vi.mock('@/core/hooks/use-current-user', () => ({ useCurrentUser: vi.fn() }))
 
 vi.mock('@/features/contabilidad/hooks/use-cuentas-config', () => ({
   cargarMapaCuentas: vi.fn(async () => ({})),
@@ -20,12 +30,32 @@ vi.mock('@/features/cxc/hooks/use-cxc', () => ({
   reversarDiferencialEnTx: vi.fn(async () => undefined),
   useDetalleFactura: vi.fn(),
 }))
+// Slice 3, task 3.1: espia usado para PROBAR que `crearNotaCredito` NUNCA
+// compone internamente una segunda venta (COMPENSACION_VENTA deja el SAFC
+// y el llamador — Slice 5 UI — hace un `crearVenta()` SEPARADO). El modulo
+// no esta importado hoy por `use-notas-credito.ts`; este mock es una red de
+// seguridad para que una futura importacion accidental rompa el test.
+const crearVentaSpy = vi.fn()
+vi.mock('@/features/ventas/hooks/use-ventas', () => ({
+  crearVenta: crearVentaSpy,
+}))
 
 import type { Transaction } from '@powersync/common'
+import { renderHook } from '@testing-library/react'
+import { useQuery } from '@powersync/react'
 import { db } from '@/core/db/powersync/db'
-import { crearNotaCredito, type CrearNotaCreditoParams } from '../use-notas-credito'
+import { useCurrentUser } from '@/core/hooks/use-current-user'
+import {
+  crearNotaCredito,
+  assertGateAntiFraudeNoDesembolso,
+  useReversosFactura,
+  useNotasCredito,
+  type CrearNotaCreditoParams,
+} from '../use-notas-credito'
 
 const mockedDb = vi.mocked(db, true)
+const mockedUseQuery = vi.mocked(useQuery)
+const mockedUseCurrentUser = vi.mocked(useCurrentUser)
 
 interface Call {
   sql: string
@@ -44,8 +74,23 @@ interface NcrTxFixtures {
     tipo: string
     status: string
     deposito_id: string
+    /** Slice 2: sesion de caja en la que se emitio la venta original. */
+    sesion_caja_id?: string | null
   }
-  ventaDet: Array<{ producto_id: string; cantidad: string; lote_id: string | null }>
+  /**
+   * Slice 4b: `id`/`precio_unitario_usd`/`tipo_impuesto`/`impuesto_pct` son
+   * opcionales — el mock les aplica defaults sensatos (`Exento`, `'0'`,
+   * precio '10.00') para no obligar a los fixtures pre-4b a especificarlos.
+   */
+  ventaDet: Array<{
+    id?: string
+    producto_id: string
+    cantidad: string
+    lote_id: string | null
+    precio_unitario_usd?: string
+    tipo_impuesto?: string
+    impuesto_pct?: string
+  }>
   productos: Record<string, { tipo: string; stock: string; nombre: string }>
   /** key `${producto_id}::${deposito_id}` -> cantidad_actual previa en inventario_stock. */
   inventarioStock?: Record<string, string>
@@ -59,6 +104,14 @@ interface NcrTxFixtures {
   depositoOrigenIsActive?: boolean
   /** Id del deposito principal activo de la empresa — solo se consulta/usa cuando `depositoOrigenIsActive` es `false` (fallback NCR). */
   principalDepositoId?: string
+  /** Slice 2: pagos NO reversados de la venta (fuente del egreso condicional + reversa). */
+  pagos?: Array<{ id: string; metodo_cobro_id: string; monto: string; moneda_id: string }>
+  /** Slice 3: saldo_actual del cliente ANTES de liquidar el remanente (Step B). */
+  clienteSaldoActual?: string
+  /** Slice 4b: SUM(cantidad) ya acreditado por venta_det_id — alimenta el guard de doble-credito (`buildSumCantidadYaAcreditadaQuery`). */
+  yaAcreditadoPorLinea?: Record<string, string>
+  /** Slice 5a-2a: si `false`, la validacion del override de deposito falla (inactivo/otra empresa). Default `true` (valido) cuando no se especifica. */
+  overrideDepositoValido?: boolean
 }
 
 /**
@@ -86,14 +139,40 @@ function mockCrearNcrTx(opts: NcrTxFixtures) {
             ? { rows: { length: 1, item: () => ({ id: opts.principalDepositoId }) } }
             : { rows: { length: 0, item: () => undefined } }
         }
+        // Slice 5a-2a: validacion del override explicito de deposito
+        // (`depositoReingresoId`, obs #2840) — activo + de la misma empresa.
+        if (sql.startsWith('SELECT id FROM depositos WHERE id = ? AND empresa_id = ? AND is_active = 1')) {
+          return opts.overrideDepositoValido === false
+            ? { rows: { length: 0, item: () => undefined } }
+            : { rows: { length: 1, item: () => ({ id: params[0] }) } }
+        }
         if (sql.startsWith('SELECT COUNT(*) as cnt FROM notas_credito')) {
           return { rows: { length: 1, item: () => ({ cnt: 0 }) } }
         }
         if (sql.startsWith('INSERT INTO notas_credito')) {
           return { rows: { length: 0, item: () => undefined } }
         }
-        if (sql.startsWith('SELECT producto_id, cantidad, lote_id FROM ventas_det')) {
-          return { rows: { length: opts.ventaDet.length, item: (i: number) => opts.ventaDet[i] } }
+        if (sql.startsWith('SELECT id, producto_id, cantidad, lote_id, precio_unitario_usd, tipo_impuesto, impuesto_pct FROM ventas_det')) {
+          const rows = opts.ventaDet.map((v, i) => ({
+            id: v.id ?? `vdet-fixture-${i}`,
+            producto_id: v.producto_id,
+            cantidad: v.cantidad,
+            lote_id: v.lote_id,
+            precio_unitario_usd: v.precio_unitario_usd ?? '10.00',
+            tipo_impuesto: v.tipo_impuesto ?? 'Exento',
+            impuesto_pct: v.impuesto_pct ?? '0',
+          }))
+          return { rows: { length: rows.length, item: (i: number) => rows[i] } }
+        }
+        // Slice 4b: guard de doble-credito — SUM(cantidad) ya acreditado
+        // por venta_det_id (`buildSumCantidadYaAcreditadaQuery`).
+        if (sql.startsWith('SELECT COALESCE(SUM(cantidad), 0) as total FROM notas_credito_det')) {
+          const ventaDetId = params[0] as string
+          const total = opts.yaAcreditadoPorLinea?.[ventaDetId] ?? '0'
+          return { rows: { length: 1, item: () => ({ total }) } }
+        }
+        if (sql.startsWith('INSERT INTO notas_credito_det')) {
+          return { rows: { length: 0, item: () => undefined } }
         }
         if (sql.startsWith('SELECT tipo, stock, nombre FROM productos')) {
           const productoId = params[0] as string
@@ -134,6 +213,25 @@ function mockCrearNcrTx(opts: NcrTxFixtures) {
         if (sql.startsWith('UPDATE ventas SET status')) {
           return { rows: { length: 0, item: () => undefined } }
         }
+        if (sql.startsWith('SELECT id, metodo_cobro_id, monto FROM pagos')) {
+          const pagos = opts.pagos ?? []
+          return { rows: { length: pagos.length, item: (i: number) => pagos[i] } }
+        }
+        if (sql.startsWith('UPDATE pagos SET is_reversed')) {
+          return { rows: { length: 0, item: () => undefined } }
+        }
+        if (sql.startsWith('INSERT INTO movimientos_metodo_cobro')) {
+          return { rows: { length: 0, item: () => undefined } }
+        }
+        if (sql.startsWith('SELECT saldo_actual FROM clientes WHERE id = ?')) {
+          return { rows: { length: 1, item: () => ({ saldo_actual: opts.clienteSaldoActual ?? '0.00' }) } }
+        }
+        if (sql.startsWith('INSERT INTO movimientos_cuenta')) {
+          return { rows: { length: 0, item: () => undefined } }
+        }
+        if (sql.startsWith('UPDATE clientes SET saldo_actual')) {
+          return { rows: { length: 0, item: () => undefined } }
+        }
 
         return { rows: { length: 0, item: () => undefined } }
       }),
@@ -150,6 +248,11 @@ function baseParams(overrides: Partial<CrearNotaCreditoParams> = {}): CrearNotaC
     motivo: 'Devolucion cliente',
     usuario_id: 'user-1',
     empresa_id: 'emp-1',
+    entryPoint: 'TRADICIONAL',
+    // Default EFECTIVO_REAL preserva el comportamiento exacto de los tests
+    // pre-slice-3 (POS+sesion-match seguia disparando el egreso condicional
+    // de la Regla de Oro tal como antes de que existiera el parametro).
+    modalidad: 'EFECTIVO_REAL',
     ...overrides,
   }
 }
@@ -381,5 +484,800 @@ describe('crearNotaCredito — Slice B (change guarda-deposito-inactivo): fallba
     })
 
     await expect(crearNotaCredito(baseParams())).rejects.toThrow(/deposito/i)
+  })
+})
+
+describe('crearNotaCredito — Slice 2 (sesion_caja_id link + Regla de Oro egreso condicional + reversa de pagos)', () => {
+  function fixturesConPagos(overrides: Partial<NcrTxFixtures['venta']> = {}, pagos?: NcrTxFixtures['pagos']) {
+    return {
+      venta: {
+        id: 'venta-1',
+        cliente_id: 'cliente-1',
+        nro_factura: 'C01-000001',
+        tasa: '40',
+        total_usd: '30.00',
+        total_bs: '1200.00',
+        saldo_pend_usd: '0.00',
+        tipo: 'CONTADO',
+        status: 'ACTIVA',
+        deposito_id: 'dep-B',
+        sesion_caja_id: 'sesion-activa-1',
+        ...overrides,
+      },
+      ventaDet: [{ producto_id: 'prod-1', cantidad: '3.000', lote_id: null }],
+      productos: { 'prod-1': { tipo: 'P', stock: '20.000', nombre: 'Producto 1' } },
+      inventarioStock: { 'prod-1::dep-B': '10.000' },
+      pagos,
+    }
+  }
+
+  it('POS + venta.sesion_caja_id === sesionCajaActivaId: inserta EGRESO en movimientos_metodo_cobro (origen NCR) con el sesion_caja_id activo', async () => {
+    const calls = mockCrearNcrTx(
+      fixturesConPagos({ sesion_caja_id: 'sesion-activa-1' }, [
+        { id: 'pago-1', metodo_cobro_id: 'metodo-efectivo', monto: '30.00', moneda_id: 'usd-id' },
+      ])
+    )
+
+    await crearNotaCredito(
+      baseParams({ entryPoint: 'POS', sesionCajaActivaId: 'sesion-activa-1' })
+    )
+
+    // Nota: 'EGRESO' y 'NCR' van hardcodeados como literales en el SQL
+    // (VALUES (?, ?, ?, 'EGRESO', 'NCR', ...)), no como parametros bindeados
+    // — se detectan via c.sql.includes(), no c.params.includes().
+    const egresoInsert = calls.find(
+      (c) => c.sql.startsWith('INSERT INTO movimientos_metodo_cobro') && c.sql.includes("'NCR'")
+    )
+    expect(egresoInsert).toBeDefined()
+    expect(egresoInsert!.sql).toContain('EGRESO')
+    expect(egresoInsert!.params).toContain('metodo-efectivo')
+    expect(egresoInsert!.params).toContain('30.00')
+    expect(egresoInsert!.params).toContain('sesion-activa-1')
+
+    const ncrInsert = calls.find((c) => c.sql.startsWith('INSERT INTO notas_credito'))
+    expect(ncrInsert).toBeDefined()
+    expect(ncrInsert!.params).toContain('sesion-activa-1')
+  })
+
+  it('POS + venta.sesion_caja_id !== sesionCajaActivaId (factura de otra sesion): NO inserta egreso (defensa en profundidad)', async () => {
+    const calls = mockCrearNcrTx(
+      fixturesConPagos({ sesion_caja_id: 'sesion-vieja' }, [
+        { id: 'pago-1', metodo_cobro_id: 'metodo-efectivo', monto: '30.00', moneda_id: 'usd-id' },
+      ])
+    )
+
+    await crearNotaCredito(
+      baseParams({ entryPoint: 'POS', sesionCajaActivaId: 'sesion-activa-1' })
+    )
+
+    const egresoInsert = calls.find(
+      (c) => c.sql.startsWith('INSERT INTO movimientos_metodo_cobro') && c.sql.includes("'NCR'")
+    )
+    expect(egresoInsert).toBeUndefined()
+  })
+
+  it('Tradicional: NO inserta egreso aunque haya pagos, y notas_credito.sesion_caja_id queda NULL', async () => {
+    const calls = mockCrearNcrTx(
+      fixturesConPagos({ sesion_caja_id: 'sesion-vieja' }, [
+        { id: 'pago-1', metodo_cobro_id: 'metodo-efectivo', monto: '30.00', moneda_id: 'usd-id' },
+      ])
+    )
+
+    await crearNotaCredito(baseParams({ entryPoint: 'TRADICIONAL' }))
+
+    const egresoInsert = calls.find(
+      (c) => c.sql.startsWith('INSERT INTO movimientos_metodo_cobro') && c.sql.includes("'NCR'")
+    )
+    expect(egresoInsert).toBeUndefined()
+
+    const ncrInsert = calls.find((c) => c.sql.startsWith('INSERT INTO notas_credito'))
+    expect(ncrInsert).toBeDefined()
+    expect(ncrInsert!.params).toContain(null)
+  })
+
+  it('multiples metodos de pago: inserta UN egreso POR metodo (per-method), cada uno con su metodo_cobro_id y monto nativo', async () => {
+    const calls = mockCrearNcrTx(
+      fixturesConPagos({ sesion_caja_id: 'sesion-activa-1' }, [
+        { id: 'pago-1', metodo_cobro_id: 'metodo-efectivo', monto: '10.00', moneda_id: 'usd-id' },
+        { id: 'pago-2', metodo_cobro_id: 'metodo-tarjeta', monto: '800.00', moneda_id: 'bs-id' },
+      ])
+    )
+
+    await crearNotaCredito(
+      baseParams({ entryPoint: 'POS', sesionCajaActivaId: 'sesion-activa-1' })
+    )
+
+    const egresos = calls.filter(
+      (c) => c.sql.startsWith('INSERT INTO movimientos_metodo_cobro') && c.sql.includes("'NCR'")
+    )
+    expect(egresos).toHaveLength(2)
+    expect(egresos.some((c) => c.params.includes('metodo-efectivo') && c.params.includes('10.00'))).toBe(true)
+    expect(egresos.some((c) => c.params.includes('metodo-tarjeta') && c.params.includes('800.00'))).toBe(true)
+  })
+
+  it('marca is_reversed=1 para los pagos no reversados de la venta (NC tipo TOTAL)', async () => {
+    const calls = mockCrearNcrTx(
+      fixturesConPagos({ sesion_caja_id: 'sesion-activa-1' }, [
+        { id: 'pago-1', metodo_cobro_id: 'metodo-efectivo', monto: '30.00', moneda_id: 'usd-id' },
+      ])
+    )
+
+    await crearNotaCredito(
+      baseParams({ entryPoint: 'POS', sesionCajaActivaId: 'sesion-activa-1' })
+    )
+
+    const reversa = calls.find((c) => c.sql.startsWith('UPDATE pagos SET is_reversed'))
+    expect(reversa).toBeDefined()
+    expect(reversa!.params).toContain('venta-1')
+  })
+
+  it('sin pagos pendientes de reversar: no inserta egresos y no revienta (reversa is un no-op)', async () => {
+    const calls = mockCrearNcrTx(fixturesConPagos({ sesion_caja_id: 'sesion-activa-1' }, []))
+
+    await crearNotaCredito(
+      baseParams({ entryPoint: 'POS', sesionCajaActivaId: 'sesion-activa-1' })
+    )
+
+    const egresoInsert = calls.find(
+      (c) => c.sql.startsWith('INSERT INTO movimientos_metodo_cobro') && c.sql.includes("'NCR'")
+    )
+    expect(egresoInsert).toBeUndefined()
+
+    const reversa = calls.find((c) => c.sql.startsWith('UPDATE pagos SET is_reversed'))
+    expect(reversa).toBeDefined()
+  })
+})
+
+describe('crearNotaCredito — Slice 3 (modalidades de liquidacion + gate anti-fraude de no-desembolso)', () => {
+  function fixturesModalidad(overrides: Partial<NcrTxFixtures['venta']> = {}) {
+    return {
+      venta: {
+        id: 'venta-1',
+        cliente_id: 'cliente-1',
+        nro_factura: 'C01-000001',
+        tasa: '40',
+        total_usd: '30.00',
+        total_bs: '1200.00',
+        saldo_pend_usd: '0.00',
+        tipo: 'CONTADO',
+        status: 'ACTIVA',
+        deposito_id: 'dep-B',
+        sesion_caja_id: 'sesion-activa-1',
+        ...overrides,
+      },
+      ventaDet: [{ producto_id: 'prod-1', cantidad: '3.000', lote_id: null }],
+      productos: { 'prod-1': { tipo: 'P', stock: '20.000', nombre: 'Producto 1' } },
+      inventarioStock: { 'prod-1::dep-B': '10.000' },
+      clienteSaldoActual: '0.00',
+    }
+  }
+
+  describe('gate anti-fraude — funcion pura (nivel de funcion, no UI)', () => {
+    it.each(['SALDO_FAVOR', 'AJUSTE_CXC', 'COMPENSACION_VENTA'] as const)(
+      'rechaza egresoParams cuando la modalidad es %s (no-efectivo)',
+      (modalidad) => {
+        expect(() =>
+          assertGateAntiFraudeNoDesembolso(modalidad, { metodoCobroId: 'm', monto: 30 })
+        ).toThrow(/no-desembolso/i)
+      }
+    )
+
+    it('permite egresoParams cuando la modalidad es EFECTIVO_REAL', () => {
+      expect(() =>
+        assertGateAntiFraudeNoDesembolso('EFECTIVO_REAL', { metodoCobroId: 'm', monto: 30 })
+      ).not.toThrow()
+    })
+
+    it('permite egresoParams cuando la modalidad es REFUND_TESORERIA', () => {
+      expect(() =>
+        assertGateAntiFraudeNoDesembolso('REFUND_TESORERIA', { metodoCobroId: 'm', monto: 30 })
+      ).not.toThrow()
+    })
+
+    it('no rechaza una modalidad no-efectivo SIN egresoParams (flujo normal)', () => {
+      expect(() => assertGateAntiFraudeNoDesembolso('SALDO_FAVOR', undefined)).not.toThrow()
+    })
+  })
+
+  it('crearNotaCredito: el gate rechaza ANTES de abrir la transaccion — llamada directa (bypass de UI) con modalidad SALDO_FAVOR + egresoParams forzado', async () => {
+    mockCrearNcrTx(fixturesModalidad())
+
+    await expect(
+      crearNotaCredito(
+        baseParams({
+          entryPoint: 'POS',
+          sesionCajaActivaId: 'sesion-activa-1',
+          modalidad: 'SALDO_FAVOR',
+          egresoParams: { metodoCobroId: 'metodo-efectivo', monto: 30 },
+        })
+      )
+    ).rejects.toThrow(/no-desembolso/i)
+
+    expect(mockedDb.writeTransaction).not.toHaveBeenCalled()
+  })
+
+  it('crearNotaCredito: REFUND_TESORERIA rechaza como "no implementado" (Slice 6), sin abrir transaccion', async () => {
+    mockCrearNcrTx(fixturesModalidad())
+
+    await expect(crearNotaCredito(baseParams({ modalidad: 'REFUND_TESORERIA' }))).rejects.toThrow(
+      /no esta implementado/i
+    )
+
+    expect(mockedDb.writeTransaction).not.toHaveBeenCalled()
+  })
+
+  it('SALDO_FAVOR: inserta movimientos_cuenta tipo SAFC trazable a nota_credito_id, CERO escritura en movimientos_metodo_cobro', async () => {
+    const calls = mockCrearNcrTx(fixturesModalidad())
+
+    await crearNotaCredito(baseParams({ entryPoint: 'TRADICIONAL', modalidad: 'SALDO_FAVOR' }))
+
+    const safcInsert = calls.find(
+      (c) => c.sql.startsWith('INSERT INTO movimientos_cuenta') && c.sql.includes("'SAFC'")
+    )
+    expect(safcInsert).toBeDefined()
+    expect(safcInsert!.params).toContain('30.00000000') // remanente = total_usd(30) - saldoPend(0), toStorageString = 8dp
+
+    // Trazabilidad: doc_origen_id del SAFC apunta al id de la NC recien creada
+    const ncrInsert = calls.find((c) => c.sql.startsWith('INSERT INTO notas_credito'))
+    const ncrId = ncrInsert!.params[0] as string
+    expect(safcInsert!.params).toContain(ncrId)
+
+    // BUGFIX (verify obs #2815): doc_origen_tipo del SAFC debe ser un valor
+    // valido para el CHECK `movimientos_cuenta_doc_origen_tipo_check`
+    // (migrations/0043_saldo_inicial_import.sql: VENTA | PAGO | NOTA_CREDITO |
+    // NOTA_DEBITO | SALDO_INICIAL). 'NCR' NO esta en esa lista — es un valor
+    // valido para `movimientos_cuenta.tipo` y para el CHECK de
+    // `movimientos_metodo_cobro.origen`, pero NO para `doc_origen_tipo` de
+    // `movimientos_cuenta`, y por eso el INSERT violaba el constraint.
+    expect(safcInsert!.params).toContain('NOTA_CREDITO')
+    expect(safcInsert!.params).not.toContain('NCR')
+
+    const egresoInsert = calls.find((c) => c.sql.startsWith('INSERT INTO movimientos_metodo_cobro'))
+    expect(egresoInsert).toBeUndefined()
+
+    // notas_credito.liquidacion_modalidad / no_desembolso persistidos (ultimos 2 params posicionales)
+    expect(ncrInsert!.params[ncrInsert!.params.length - 2]).toBe('SALDO_FAVOR')
+    expect(ncrInsert!.params[ncrInsert!.params.length - 1]).toBe(1) // no_desembolso = TRUE
+  })
+
+  it('COMPENSACION_VENTA: MISMO comportamiento SAFC que SALDO_FAVOR dentro de esta funcion, y NUNCA invoca crearVenta() internamente', async () => {
+    const calls = mockCrearNcrTx(fixturesModalidad())
+
+    await crearNotaCredito(baseParams({ entryPoint: 'TRADICIONAL', modalidad: 'COMPENSACION_VENTA' }))
+
+    const safcInsert = calls.find(
+      (c) => c.sql.startsWith('INSERT INTO movimientos_cuenta') && c.sql.includes("'SAFC'")
+    )
+    expect(safcInsert).toBeDefined()
+    expect(crearVentaSpy).not.toHaveBeenCalled()
+  })
+
+  it('AJUSTE_CXC: reduce clientes.saldo_actual via movimientos_cuenta (Step B), CERO escritura de caja', async () => {
+    const calls = mockCrearNcrTx(fixturesModalidad())
+
+    await crearNotaCredito(baseParams({ entryPoint: 'TRADICIONAL', modalidad: 'AJUSTE_CXC' }))
+
+    const ajusteInsert = calls.find(
+      (c) => c.sql.startsWith('INSERT INTO movimientos_cuenta') && c.sql.includes("'NCR'")
+    )
+    expect(ajusteInsert).toBeDefined()
+    expect(ajusteInsert!.params).toContain('30.00000000')
+
+    const egresoInsert = calls.find((c) => c.sql.startsWith('INSERT INTO movimientos_metodo_cobro'))
+    expect(egresoInsert).toBeUndefined()
+  })
+
+  it('AJUSTE_CXC nunca deja el saldo del cliente negativo — tope en 0 aunque el remanente exceda la deuda existente', async () => {
+    const calls = mockCrearNcrTx(fixturesModalidad())
+    // clienteSaldoActual por defecto en el fixture es '0.00' — el remanente
+    // (30.00) excede la deuda existente (0), el tope debe evitar negativo.
+
+    await crearNotaCredito(baseParams({ entryPoint: 'TRADICIONAL', modalidad: 'AJUSTE_CXC' }))
+
+    const ajusteInsert = calls.find(
+      (c) => c.sql.startsWith('INSERT INTO movimientos_cuenta') && c.sql.includes("'NCR'")
+    )
+    expect(ajusteInsert).toBeDefined()
+    // saldo_nuevo (saldoActual - remanente, topeado en 0) queda en '0.00000000', nunca negativo
+    expect(ajusteInsert!.params).toContain('0.00000000')
+  })
+
+  it('REGRESION obs #2814 — POS + sesion activa + modalidad SALDO_FAVOR: la Regla de Oro NO escribe ningun EGRESO (pin del fix de modalidad)', async () => {
+    const calls = mockCrearNcrTx(fixturesModalidad({ sesion_caja_id: 'sesion-activa-1' }))
+
+    await crearNotaCredito(
+      baseParams({
+        entryPoint: 'POS',
+        sesionCajaActivaId: 'sesion-activa-1',
+        modalidad: 'SALDO_FAVOR',
+      })
+    )
+
+    const egresoInsert = calls.find(
+      (c) => c.sql.startsWith('INSERT INTO movimientos_metodo_cobro') && c.sql.includes("'NCR'")
+    )
+    expect(egresoInsert).toBeUndefined()
+  })
+
+  it('remanente cero (factura nunca cobrada, saldoPend == total_usd): ninguna modalidad no-efectivo escribe Step B (SAFC)', async () => {
+    const calls = mockCrearNcrTx(fixturesModalidad({ total_usd: '30.00', saldo_pend_usd: '30.00' }))
+
+    await crearNotaCredito(baseParams({ entryPoint: 'TRADICIONAL', modalidad: 'SALDO_FAVOR' }))
+
+    const safcInsert = calls.find(
+      (c) => c.sql.startsWith('INSERT INTO movimientos_cuenta') && c.sql.includes("'SAFC'")
+    )
+    expect(safcInsert).toBeUndefined()
+  })
+})
+
+describe('crearNotaCredito — Slice 5a-2a (depositoReingresoId threading, obs #2840, cierra el WARNING de Slice 5a)', () => {
+  function fixturesDeposito(overrides: Partial<NcrTxFixtures> = {}) {
+    return {
+      venta: {
+        id: 'venta-1',
+        cliente_id: 'cliente-1',
+        nro_factura: 'C01-000001',
+        tasa: '40',
+        total_usd: '30.00',
+        total_bs: '1200.00',
+        saldo_pend_usd: '0.00',
+        tipo: 'CONTADO',
+        status: 'ACTIVA',
+        deposito_id: 'dep-B',
+      },
+      ventaDet: [{ producto_id: 'prod-1', cantidad: '3.000', lote_id: null }],
+      productos: { 'prod-1': { tipo: 'P', stock: '20.000', nombre: 'Producto 1' } },
+      ...overrides,
+    }
+  }
+
+  it('depositoReingresoId explicito y activo: se usa en vez del riel automatico, ignorando venta.deposito_id', async () => {
+    const calls = mockCrearNcrTx(
+      fixturesDeposito({ inventarioStock: { 'prod-1::dep-override': '5.000' } })
+    )
+
+    await crearNotaCredito(baseParams({ depositoReingresoId: 'dep-override' }))
+
+    const kardexInsert = calls.find((c) => c.sql.startsWith('INSERT INTO movimientos_inventario'))
+    expect(kardexInsert).toBeDefined()
+    expect(kardexInsert!.params).toContain('dep-override')
+    expect(kardexInsert!.params).not.toContain('dep-B')
+
+    // El override evita por completo el riel automatico (nunca consulta
+    // is_active del origen ni busca el principal).
+    expect(calls.find((c) => c.sql.startsWith('SELECT is_active FROM depositos'))).toBeUndefined()
+    expect(calls.find((c) => c.sql.includes('es_principal'))).toBeUndefined()
+  })
+
+  it('depositoReingresoId invalido (inactivo o de otra empresa): rechaza ANTES de escribir cualquier kardex', async () => {
+    const calls = mockCrearNcrTx(fixturesDeposito({ overrideDepositoValido: false }))
+
+    await expect(
+      crearNotaCredito(baseParams({ depositoReingresoId: 'dep-ajena' }))
+    ).rejects.toThrow(/deposito/i)
+
+    expect(calls.find((c) => c.sql.startsWith('INSERT INTO movimientos_inventario'))).toBeUndefined()
+    expect(calls.find((c) => c.sql.startsWith('INSERT INTO notas_credito'))).toBeUndefined()
+  })
+
+  it('sin depositoReingresoId: preserva el riel automatico existente (regresion — comportamiento previo intacto)', async () => {
+    const calls = mockCrearNcrTx(fixturesDeposito({ inventarioStock: { 'prod-1::dep-B': '10.000' } }))
+
+    await crearNotaCredito(baseParams())
+
+    const overrideValidation = calls.find((c) =>
+      c.sql.startsWith('SELECT id FROM depositos WHERE id = ? AND empresa_id = ? AND is_active = 1')
+    )
+    expect(overrideValidation).toBeUndefined()
+
+    const kardexInsert = calls.find((c) => c.sql.startsWith('INSERT INTO movimientos_inventario'))
+    expect(kardexInsert!.params).toContain('dep-B')
+  })
+})
+
+describe('crearNotaCredito — Slice 4b (wiring PARCIAL en la tx atomica: notas_credito_det, guard doble-credito, desglose fiscal por linea)', () => {
+  const ventaDetDosLineas = [
+    {
+      id: 'vdet-A',
+      producto_id: 'prod-A',
+      cantidad: '4.000',
+      lote_id: null,
+      precio_unitario_usd: '10.00',
+      tipo_impuesto: 'Gravable',
+      impuesto_pct: '16',
+    },
+    {
+      id: 'vdet-B',
+      producto_id: 'prod-B',
+      cantidad: '2.000',
+      lote_id: null,
+      precio_unitario_usd: '15.00',
+      tipo_impuesto: 'Exento',
+      impuesto_pct: '0',
+    },
+  ]
+  const productosDosLineas = {
+    'prod-A': { tipo: 'P', stock: '50.000', nombre: 'Producto A' },
+    'prod-B': { tipo: 'P', stock: '20.000', nombre: 'Producto B' },
+  }
+
+  it('TOTAL (tipo omitido): sigue derivando TODAS las lineas — escribe un notas_credito_det POR LINEA (antes NUNCA se escribia) y preserva total_usd/total_bs verbatim de venta.total_usd/total_bs, sumando el desglose SOLO en las columnas nuevas', async () => {
+    const calls = mockCrearNcrTx({
+      venta: {
+        id: 'venta-1',
+        cliente_id: 'cliente-1',
+        nro_factura: 'C01-000001',
+        tasa: '40',
+        total_usd: '100.00',
+        total_bs: '4000.00',
+        saldo_pend_usd: '0.00',
+        tipo: 'CONTADO',
+        status: 'ACTIVA',
+        deposito_id: 'dep-B',
+      },
+      ventaDet: ventaDetDosLineas,
+      productos: productosDosLineas,
+      inventarioStock: { 'prod-A::dep-B': '10.000', 'prod-B::dep-B': '5.000' },
+    })
+
+    await crearNotaCredito(baseParams({ entryPoint: 'TRADICIONAL', modalidad: 'AJUSTE_CXC' }))
+
+    const detInserts = calls.filter((c) => c.sql.startsWith('INSERT INTO notas_credito_det'))
+    expect(detInserts).toHaveLength(2)
+    expect(detInserts.some((c) => c.params.includes('vdet-A'))).toBe(true)
+    expect(detInserts.some((c) => c.params.includes('vdet-B'))).toBe(true)
+
+    const kardexInserts = calls.filter((c) => c.sql.startsWith('INSERT INTO movimientos_inventario'))
+    expect(kardexInserts).toHaveLength(2)
+    expect(kardexInserts.some((c) => c.params.includes('4.000'))).toBe(true) // linea A completa
+    expect(kardexInserts.some((c) => c.params.includes('2.000'))).toBe(true) // linea B completa
+
+    const ncrInsert = calls.find((c) => c.sql.startsWith('INSERT INTO notas_credito ('))
+    expect(ncrInsert).toBeDefined()
+    expect(ncrInsert!.params).toContain('TOTAL')
+    // total_usd/total_bs preservan venta.total_usd/total_bs VERBATIM (no se recomputan sumando lineas)
+    expect(ncrInsert!.params).toContain('100.00')
+    expect(ncrInsert!.params).toContain('4000.00')
+    // Columnas nuevas (antes siempre 0, nunca escritas): exento=linea B (30.00), base=linea A (40.00), iva=linea A (6.40)
+    expect(ncrInsert!.params).toContain('30.00000000')
+    expect(ncrInsert!.params).toContain('40.00000000')
+    expect(ncrInsert!.params).toContain('6.40000000')
+  })
+
+  it('PARCIAL: escribe notas_credito_det + Kardex SOLO para la linea/cantidad seleccionada, tipo=PARCIAL, y el header usa la suma de lineas (no venta.total_usd completo)', async () => {
+    const calls = mockCrearNcrTx({
+      venta: {
+        id: 'venta-1',
+        cliente_id: 'cliente-1',
+        nro_factura: 'C01-000001',
+        tasa: '40',
+        total_usd: '100.00',
+        total_bs: '4000.00',
+        saldo_pend_usd: '0.00',
+        tipo: 'CONTADO',
+        status: 'ACTIVA',
+        deposito_id: 'dep-B',
+      },
+      ventaDet: ventaDetDosLineas,
+      productos: productosDosLineas,
+      inventarioStock: { 'prod-A::dep-B': '10.000' },
+      clienteSaldoActual: '0.00',
+    })
+
+    await crearNotaCredito(
+      baseParams({
+        entryPoint: 'TRADICIONAL',
+        modalidad: 'AJUSTE_CXC',
+        tipo: 'PARCIAL',
+        lineas: [{ venta_det_id: 'vdet-A', cantidadDevolver: '2.000' }],
+      })
+    )
+
+    const detInserts = calls.filter((c) => c.sql.startsWith('INSERT INTO notas_credito_det'))
+    expect(detInserts).toHaveLength(1)
+    expect(detInserts[0]!.params).toContain('vdet-A')
+    expect(detInserts[0]!.params).toContain('2.000') // cantidad devuelta, NO los 4.000 vendidos
+    expect(detInserts[0]!.params).toContain('20.00000000') // subtotal_usd = 2 * 10.00
+
+    const kardexInserts = calls.filter((c) => c.sql.startsWith('INSERT INTO movimientos_inventario'))
+    expect(kardexInserts).toHaveLength(1)
+    expect(kardexInserts[0]!.params).toContain('2.000')
+    expect(kardexInserts[0]!.params).not.toContain('prod-B')
+
+    const ncrInsert = calls.find((c) => c.sql.startsWith('INSERT INTO notas_credito ('))
+    expect(ncrInsert).toBeDefined()
+    expect(ncrInsert!.params).toContain('PARCIAL')
+    // total_usd = 23.20 (base 20.00 + iva 3.20 de la linea A parcial) — NO 100.00 (venta.total_usd completo)
+    expect(ncrInsert!.params).toContain('23.20000000')
+    expect(ncrInsert!.params).toContain('928.00000000') // total_bs = usdToBs(23.20, 40)
+    expect(ncrInsert!.params).toContain('20.00000000') // total_base_usd
+    expect(ncrInsert!.params).toContain('3.20000000') // total_iva_usd
+    expect(ncrInsert!.params).not.toContain('100.00')
+
+    // Step B (remanente = 23.20, saldoPend=0) liquida via AJUSTE_CXC
+    const ajusteInsert = calls.find(
+      (c) => c.sql.startsWith('INSERT INTO movimientos_cuenta') && c.sql.includes("'NCR'")
+    )
+    expect(ajusteInsert).toBeDefined()
+    expect(ajusteInsert!.params).toContain('23.20000000')
+
+    // La factura permanece ACTIVA — nunca se marca ANULADA para PARCIAL
+    const ventaUpdate = calls.find((c) => c.sql.startsWith('UPDATE ventas SET saldo_pend_usd'))
+    expect(ventaUpdate).toBeDefined()
+    expect(ventaUpdate!.sql).not.toContain('status')
+    const statusUpdate = calls.find((c) => c.sql.includes("status = 'ANULADA'"))
+    expect(statusUpdate).toBeUndefined()
+  })
+
+  it('PARCIAL: el guard de doble-credito rechaza cuando ya-acreditado + cantidadDevolver excede la cantidad original — NADA se persiste (ni header ni det)', async () => {
+    const calls = mockCrearNcrTx({
+      venta: {
+        id: 'venta-1',
+        cliente_id: 'cliente-1',
+        nro_factura: 'C01-000001',
+        tasa: '40',
+        total_usd: '100.00',
+        total_bs: '4000.00',
+        saldo_pend_usd: '0.00',
+        tipo: 'CONTADO',
+        status: 'ACTIVA',
+        deposito_id: 'dep-B',
+      },
+      ventaDet: ventaDetDosLineas,
+      productos: productosDosLineas,
+      yaAcreditadoPorLinea: { 'vdet-A': '3.000' }, // ya se acredito 3 de 4 en una NC previa
+    })
+
+    await expect(
+      crearNotaCredito(
+        baseParams({
+          entryPoint: 'TRADICIONAL',
+          modalidad: 'AJUSTE_CXC',
+          tipo: 'PARCIAL',
+          lineas: [{ venta_det_id: 'vdet-A', cantidadDevolver: '2.000' }], // 3 + 2 = 5 > 4 original
+        })
+      )
+    ).rejects.toThrow(/ya tiene/i)
+
+    expect(calls.find((c) => c.sql.startsWith('INSERT INTO notas_credito ('))).toBeUndefined()
+    expect(calls.find((c) => c.sql.startsWith('INSERT INTO notas_credito_det'))).toBeUndefined()
+  })
+
+  it('PARCIAL: linea de servicio NO seleccionada no genera movimiento de receta (Kardex/receta escopeado a la seleccion)', async () => {
+    const calls = mockCrearNcrTx({
+      venta: {
+        id: 'venta-1',
+        cliente_id: 'cliente-1',
+        nro_factura: 'C01-000001',
+        tasa: '40',
+        total_usd: '100.00',
+        total_bs: '4000.00',
+        saldo_pend_usd: '0.00',
+        tipo: 'CONTADO',
+        status: 'ACTIVA',
+        deposito_id: 'dep-B',
+      },
+      ventaDet: [
+        {
+          id: 'vdet-A',
+          producto_id: 'prod-A',
+          cantidad: '4.000',
+          lote_id: null,
+          precio_unitario_usd: '10.00',
+          tipo_impuesto: 'Exento',
+        },
+        {
+          id: 'vdet-S',
+          producto_id: 'servicio-1',
+          cantidad: '2.000',
+          lote_id: null,
+          precio_unitario_usd: '50.00',
+          tipo_impuesto: 'Exento',
+        },
+      ],
+      productos: {
+        'prod-A': { tipo: 'P', stock: '50.000', nombre: 'Producto A' },
+        'servicio-1': { tipo: 'S', stock: '0.000', nombre: 'Servicio 1' },
+        'ing-1': { tipo: 'P', stock: '50.000', nombre: 'Ingrediente 1' },
+      },
+      recetas: {
+        'servicio-1': [{ producto_id: 'ing-1', cantidad: '1.000', stock: '50.000', nombre: 'Ingrediente 1' }],
+      },
+      inventarioStock: { 'prod-A::dep-B': '10.000' },
+      clienteSaldoActual: '0.00',
+    })
+
+    await crearNotaCredito(
+      baseParams({
+        entryPoint: 'TRADICIONAL',
+        modalidad: 'AJUSTE_CXC',
+        tipo: 'PARCIAL',
+        lineas: [{ venta_det_id: 'vdet-A', cantidadDevolver: '4.000' }], // solo el producto, NUNCA el servicio
+      })
+    )
+
+    const detInserts = calls.filter((c) => c.sql.startsWith('INSERT INTO notas_credito_det'))
+    expect(detInserts).toHaveLength(1)
+    expect(detInserts[0]!.params).toContain('vdet-A')
+
+    // La receta del servicio nunca se consulta — la linea no fue seleccionada
+    expect(calls.find((c) => c.sql.startsWith('SELECT r.producto_id'))).toBeUndefined()
+    const kardexIngrediente = calls.find(
+      (c) => c.sql.startsWith('INSERT INTO movimientos_inventario') && c.params.includes('ing-1')
+    )
+    expect(kardexIngrediente).toBeUndefined()
+  })
+
+  it('PARCIAL con factura CREDITO parcialmente pendiente: Step A aplica solo hasta el limite de la deuda pendiente (no el total de la NC), y Step B liquida el resto', async () => {
+    const calls = mockCrearNcrTx({
+      venta: {
+        id: 'venta-1',
+        cliente_id: 'cliente-1',
+        nro_factura: 'C01-000001',
+        tasa: '40',
+        total_usd: '46.40',
+        total_bs: '1856.00',
+        saldo_pend_usd: '10.00', // deuda pendiente MENOR al valor de la NC parcial (23.20)
+        tipo: 'CREDITO',
+        status: 'ACTIVA',
+        deposito_id: 'dep-B',
+      },
+      ventaDet: [
+        {
+          id: 'vdet-A',
+          producto_id: 'prod-A',
+          cantidad: '4.000',
+          lote_id: null,
+          precio_unitario_usd: '10.00',
+          tipo_impuesto: 'Gravable',
+          impuesto_pct: '16',
+        },
+      ],
+      productos: { 'prod-A': { tipo: 'P', stock: '50.000', nombre: 'Producto A' } },
+      inventarioStock: { 'prod-A::dep-B': '10.000' },
+      clienteSaldoActual: '0.00',
+    })
+
+    await crearNotaCredito(
+      baseParams({
+        entryPoint: 'TRADICIONAL',
+        modalidad: 'SALDO_FAVOR',
+        tipo: 'PARCIAL',
+        lineas: [{ venta_det_id: 'vdet-A', cantidadDevolver: '2.000' }], // totalUsdNc = 23.20
+      })
+    )
+
+    // Step A: reduce la deuda pendiente de la FACTURA — topeado por saldoPend (10.00), no por totalUsdNc (23.20)
+    const stepAInsert = calls.find(
+      (c) => c.sql.startsWith('INSERT INTO movimientos_cuenta') && c.sql.includes("'NCR'") && c.params.includes('venta-1')
+    )
+    expect(stepAInsert).toBeDefined()
+    expect(stepAInsert!.params).toContain('10.00000000')
+
+    // Step B: liquida el remanente (23.20 - 10.00 = 13.20) via SALDO_FAVOR (SAFC)
+    const safcInsert = calls.find(
+      (c) => c.sql.startsWith('INSERT INTO movimientos_cuenta') && c.sql.includes("'SAFC'")
+    )
+    expect(safcInsert).toBeDefined()
+    expect(safcInsert!.params).toContain('13.20000000')
+
+    // saldo_pend_usd de la factura queda en 0 (10.00 - 23.20 topeado en 0), sin marcar ANULADA
+    const ventaUpdate = calls.find((c) => c.sql.startsWith('UPDATE ventas SET saldo_pend_usd'))
+    expect(ventaUpdate).toBeDefined()
+    expect(ventaUpdate!.params).toContain('0.00000000')
+  })
+})
+
+describe('useReversosFactura (F1 QA fix: historial de NC aplicadas a una factura, JOIN notas_credito+notas_credito_det, empresa_id-scoped)', () => {
+  beforeEach(() => {
+    mockedUseQuery.mockReturnValue({ data: [], isLoading: false } as never)
+  })
+
+  it('sin ventaId: no ejecuta la query (sql vacio), retorna lista vacia', () => {
+    const { result } = renderHook(() => useReversosFactura(null, 'emp-1'))
+
+    expect(result.current.reversos).toEqual([])
+    expect(mockedUseQuery).toHaveBeenCalledWith('', [])
+  })
+
+  it('con ventaId + empresaId: ejecuta la query JOIN notas_credito+notas_credito_det escopeada por empresa_id', () => {
+    renderHook(() => useReversosFactura('venta-1', 'emp-1'))
+
+    const [sql, params] = mockedUseQuery.mock.calls[0]
+    expect(sql).toContain('notas_credito_det')
+    expect(sql).toContain('nc.empresa_id = ?')
+    expect(params).toEqual(['venta-1', 'emp-1'])
+  })
+
+  it('mapea las filas retornadas al shape ReversoFacturaRow (nro_ncr, tipo, venta_det_id, cantidad)', () => {
+    mockedUseQuery.mockReturnValue({
+      data: [
+        {
+          nota_credito_id: 'nc-1',
+          nro_ncr: 'NCR-000001',
+          tipo: 'PARCIAL',
+          fecha: '2026-01-02T00:00:00Z',
+          venta_det_id: 'vd-1',
+          producto_descripcion: 'Botox 50U',
+          cantidad: '2.000',
+        },
+      ],
+      isLoading: false,
+    } as never)
+
+    const { result } = renderHook(() => useReversosFactura('venta-1', 'emp-1'))
+
+    expect(result.current.reversos).toHaveLength(1)
+    expect(result.current.reversos[0]).toMatchObject({ nro_ncr: 'NCR-000001', venta_det_id: 'vd-1', cantidad: '2.000' })
+  })
+})
+
+describe('useNotasCredito — Slice B (notas-credito-ruta-administrativa, Design §Decision 4): filtros opcionales con default mes actual', () => {
+  beforeEach(() => {
+    mockedUseCurrentUser.mockReturnValue({
+      user: { id: 'user-1', empresa_id: 'emp-1', email: '', nombre: '', level: 1, rol_id: null, rol_nombre: null },
+      loading: false,
+    })
+    mockedUseQuery.mockReturnValue({ data: [], isLoading: false } as never)
+  })
+
+  it('sin args: preserva el comportamiento actual byte-a-byte (consumidores no migrados, smoke) — sin rango de fecha, params = [empresaId]', () => {
+    renderHook(() => useNotasCredito())
+
+    const [sql, params] = mockedUseQuery.mock.calls[0]!
+    expect(sql).not.toContain('datetime(')
+    expect(sql).not.toContain('nc.fecha >=')
+    expect(params).toEqual(['emp-1'])
+  })
+
+  it('con filtros={} (sin fecha explicita): aplica rangoMesActual() por defecto', () => {
+    vi.setSystemTime(new Date('2026-05-21T12:00:00'))
+
+    renderHook(() => useNotasCredito({}))
+
+    const [sql, params] = mockedUseQuery.mock.calls[0]!
+    expect(sql).toContain('nc.empresa_id = ?')
+    expect(params).toEqual(['emp-1', '2026-05-01', '2026-05-21'])
+    vi.useRealTimers()
+  })
+
+  it('fechaDesde/fechaHasta explicitos bypasean el default de mes actual (escape hatch "ver todo el historial")', () => {
+    renderHook(() => useNotasCredito({ fechaDesde: '2020-01-01', fechaHasta: '2026-05-21' }))
+
+    const [, params] = mockedUseQuery.mock.calls[0]!
+    expect(params).toEqual(['emp-1', '2020-01-01', '2026-05-21'])
+  })
+
+  it('Slice E.2: filtro busqueda (unificado) se aplica via buildNotasCreditoFiltro', () => {
+    renderHook(() => useNotasCredito({ fechaDesde: '2026-05-01', fechaHasta: '2026-05-21', busqueda: 'NCR-000012' }))
+
+    const [sql, params] = mockedUseQuery.mock.calls[0]!
+    expect(sql).toContain('AND (nc.nro_ncr LIKE ? OR c.nombre LIKE ? OR c.identificacion LIKE ?)')
+    expect(params).toContain('%NCR-000012%')
+  })
+
+  it('Slice E.b: el filtro de estado se retiro por completo — nc.tipo nunca es filtrable via el hook', () => {
+    renderHook(() => useNotasCredito({ fechaDesde: '2026-05-01', fechaHasta: '2026-05-21', busqueda: 'Maria' }))
+
+    const [sql] = mockedUseQuery.mock.calls[0]!
+    expect(sql).not.toContain('nc.tipo = ?')
+  })
+
+  it('el campo `estado` YA NO existe en FiltroNotasCreditoHook (retirado, tester QA feedback Slice E.b)', () => {
+    // @ts-expect-error — `estado` fue retirado del contrato publico del hook
+    renderHook(() => useNotasCredito({ fechaDesde: '2026-05-01', fechaHasta: '2026-05-21', estado: 'REVERSO_TOTAL' }))
+
+    const [sql] = mockedUseQuery.mock.calls[0]!
+    expect(sql).not.toContain('nc.tipo = ?')
+  })
+
+  it('empresa_id SIEMPRE presente en params, con o sin filtros', () => {
+    renderHook(() => useNotasCredito())
+    expect(mockedUseQuery.mock.calls[0]![1]).toContain('emp-1')
+
+    mockedUseQuery.mockClear()
+    renderHook(() => useNotasCredito({ fechaDesde: '2026-05-01', fechaHasta: '2026-05-21' }))
+    expect(mockedUseQuery.mock.calls[0]![1]).toContain('emp-1')
   })
 })

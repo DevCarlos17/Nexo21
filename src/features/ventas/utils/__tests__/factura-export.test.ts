@@ -474,23 +474,23 @@ describe('construirFilasTotales', () => {
       'IGTF',
       'TOTAL + IGTF',
     ])
-    expect(filas[0]).toEqual({ label: 'Monto Exento', monto: '$1.00', bold: false })
-    expect(filas[1]).toEqual({ label: 'Base Imponible', monto: '$3.00', bold: false })
-    expect(filas[2]).toEqual({ label: 'IVA 8%', monto: '$0.08', bold: false })
-    expect(filas[4]).toEqual({ label: 'TOTAL FACTURA', monto: '$4.24 (Bs. 42,40)', bold: false })
-    expect(filas[5]).toEqual({ label: 'IGTF', monto: '$0.06', bold: false })
-    expect(filas[6]).toEqual({ label: 'TOTAL + IGTF', monto: '$4.30 (Bs. 43,00)', bold: true })
+    expect(filas[0]).toEqual({ label: 'Monto Exento', monto: '$1.00', montoBs: 'Bs. 10,00', bold: false })
+    expect(filas[1]).toEqual({ label: 'Base Imponible', monto: '$3.00', montoBs: 'Bs. 30,00', bold: false })
+    expect(filas[2]).toEqual({ label: 'IVA 8%', monto: '$0.08', montoBs: 'Bs. 0,80', bold: false })
+    expect(filas[4]).toEqual({ label: 'TOTAL FACTURA', monto: '$4.24 (Bs. 42,40)', montoBs: null, bold: false })
+    expect(filas[5]).toEqual({ label: 'IGTF', monto: '$0.06', montoBs: 'Bs. 0,60', bold: false })
+    expect(filas[6]).toEqual({ label: 'TOTAL + IGTF', monto: '$4.30 (Bs. 43,00)', montoBs: null, bold: true })
   })
 
   it("con moneda 'BS': las filas intermedias muestran SOLO Bs; las 2 filas finales (TOTAL FACTURA e TOTAL + IGTF) muestran Bs primario + USD entre parentesis (toggle-aware)", () => {
     const filas = construirFilasTotales(totalesFixture(), 'BS')
 
-    expect(filas[0]).toEqual({ label: 'Monto Exento', monto: 'Bs. 10,00', bold: false })
-    expect(filas[1]).toEqual({ label: 'Base Imponible', monto: 'Bs. 30,00', bold: false })
-    expect(filas[2]).toEqual({ label: 'IVA 8%', monto: 'Bs. 0,80', bold: false })
-    expect(filas[4]).toEqual({ label: 'TOTAL FACTURA', monto: 'Bs. 42,40 ($4.24)', bold: false })
-    expect(filas[5]).toEqual({ label: 'IGTF', monto: 'Bs. 0,60', bold: false })
-    expect(filas[6]).toEqual({ label: 'TOTAL + IGTF', monto: 'Bs. 43,00 ($4.30)', bold: true })
+    expect(filas[0]).toEqual({ label: 'Monto Exento', monto: 'Bs. 10,00', montoBs: null, bold: false })
+    expect(filas[1]).toEqual({ label: 'Base Imponible', monto: 'Bs. 30,00', montoBs: null, bold: false })
+    expect(filas[2]).toEqual({ label: 'IVA 8%', monto: 'Bs. 0,80', montoBs: null, bold: false })
+    expect(filas[4]).toEqual({ label: 'TOTAL FACTURA', monto: 'Bs. 42,40 ($4.24)', montoBs: null, bold: false })
+    expect(filas[5]).toEqual({ label: 'IGTF', monto: 'Bs. 0,60', montoBs: null, bold: false })
+    expect(filas[6]).toEqual({ label: 'TOTAL + IGTF', monto: 'Bs. 43,00 ($4.30)', montoBs: null, bold: true })
   })
 
   it('sin IGTF (null): TOTAL FACTURA es la fila final, bold, muestra USD + equivalente Bs entre parentesis (toggle-aware), sin fila de IGTF ni sufijo "+ IGTF"', () => {
@@ -498,7 +498,7 @@ describe('construirFilasTotales', () => {
 
     expect(filas.map((f) => f.label)).not.toContain('IGTF')
     expect(filas.map((f) => f.label)).not.toContain('TOTAL + IGTF')
-    expect(filas.at(-1)).toEqual({ label: 'TOTAL FACTURA', monto: '$4.24 (Bs. 42,40)', bold: true })
+    expect(filas.at(-1)).toEqual({ label: 'TOTAL FACTURA', monto: '$4.24 (Bs. 42,40)', montoBs: null, bold: true })
   })
 
   it('sin IGTF (0): mismo comportamiento que null — sin fila de IGTF', () => {
@@ -1111,7 +1111,12 @@ describe('backward-compat guard (WU2, task 4.1): moneda_presentacion_documentos 
     expect(texto).toContain('Vuelto entregado: Bs. 500,00 ($1.00)')
     // Fila final bold (sin IGTF -> TOTAL FACTURA es la final): USD primario + Bs entre parentesis (toggle-aware)
     const filas = construirFilasTotales(recibo.totales, recibo.monedaPresentacion)
-    expect(filas.at(-1)).toEqual({ label: 'TOTAL FACTURA', monto: '$11.60 (Bs. 5.800,00)', bold: true })
+    expect(filas.at(-1)).toEqual({
+      label: 'TOTAL FACTURA',
+      monto: '$11.60 (Bs. 5.800,00)',
+      montoBs: null,
+      bold: true,
+    })
   })
 })
 

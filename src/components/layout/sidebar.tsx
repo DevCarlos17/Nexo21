@@ -82,7 +82,7 @@ const menuItems: MenuItem[] = [
     icon: ShoppingCart,
     children: [
       { title: 'Nueva Venta', url: '/ventas/nueva', icon: ShoppingCart, requiredPermission: PERMISSIONS.SALES_CREATE },
-      { title: 'Nota de Credito', url: '/ventas/notas-credito', icon: FileX, requiredPermission: PERMISSIONS.SALES_VOID },
+      { title: 'Facturas emitidas', url: '/ventas/facturas-emitidas', icon: FileX, requiredPermission: PERMISSIONS.SALES_VOID },
       { title: 'Dashboard de Ventas', url: '/ventas/reportes', icon: ChartBar, requiredPermission: PERMISSIONS.REPORTS_VIEW },
       { title: 'Cuadre de Caja', url: '/ventas/cuadre-de-caja', icon: Receipt, requiredPermission: PERMISSIONS.REPORTS_CASHCLOSE },
       { title: 'Prestamos', url: '/ventas/prestamos', icon: Handshake, requiredPermission: PERMISSIONS.CLIENTS_CREDIT },

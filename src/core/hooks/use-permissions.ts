@@ -7,6 +7,7 @@ export const PERMISSIONS = {
   SALES_CREATE: 'ventas.crear',
   SALES_VOID: 'ventas.anular',
   SALES_ABSORB_DIFFERENTIAL: 'ventas.absorber_diferencial',
+  SALES_NOTA_CREDITO: 'ventas.nota_credito',
   SALES_OVERRIDE_STOCK: 'ventas.facturar_negativo',
   INVENTORY_VIEW: 'inventario.ver',
   INVENTORY_ADJUST: 'inventario.ajustar',

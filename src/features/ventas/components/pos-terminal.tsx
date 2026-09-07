@@ -1,6 +1,6 @@
 import { useState, useEffect, useRef } from 'react'
 import { useQuery } from '@powersync/react'
-import { Plus, Trash, FloppyDisk, ListBullets, ArrowCircleDown, ArrowCircleUp, Wallet, Handshake, XCircle, User, ShoppingCart, Tag, X, CaretDown } from '@phosphor-icons/react'
+import { Plus, Trash, FloppyDisk, ListBullets, ArrowCircleDown, ArrowCircleUp, Wallet, Handshake, XCircle, User, ShoppingCart, Tag, X, CaretDown, FileX } from '@phosphor-icons/react'
 import { toast } from 'sonner'
 import { v4 as uuidv4 } from 'uuid'
 import { useBlocker, useNavigate } from '@tanstack/react-router'
@@ -39,6 +39,11 @@ import { useCajasFuerteActivas } from '@/features/tesoreria/hooks/use-caja-fuert
 import { PrestamoModal, type PrestamoAplicado } from '@/features/caja/components/prestamo-modal'
 import { useFacturasEsperaStore, type FacturaEnEspera } from '../stores/facturas-espera-store'
 import { CobroModal } from './cobro-modal'
+// Nota de Credito POS-express (Slice 5a-2a) — modal auto-contenido, sibling
+// del flujo de venta. Deliberadamente NO comparte estado con CobroModal ni
+// con facturas-espera-store: es un flujo lateral independiente que nunca
+// toca `lineas`/`cargosEspeciales`/el carrito en curso.
+import { NotaCreditoPosModal } from './nota-credito-pos-modal'
 import { Sheet, SheetContent, SheetHeader, SheetTitle } from '@/components/ui/sheet'
 
 // Descuentos comerciales pausados — ver decisión #1470. El estado y el threading
@@ -117,6 +122,7 @@ export function PosTerminal() {
   const [showCierrePosPin, setShowCierrePosPin] = useState(false)
   const [showCierrePos, setShowCierrePos] = useState(false)
   const [showCobroModal, setShowCobroModal] = useState(false)
+  const [showNotaCreditoModal, setShowNotaCreditoModal] = useState(false)
   const [ventaExitosa, setVentaExitosa] = useState<VentaExitosaData | null>(null)
 
   // Refs for navigation blocker (always captures latest state)
@@ -561,7 +567,7 @@ export function PosTerminal() {
     const anyModalOpen =
       showConfirm || showSupervisorPin || showEsperaModal || showNuevoClienteModal ||
       showIngresoModal || showRetiroModal || showAvanceModal || showPrestamoModal ||
-      showCierrePosPin || showCierrePos || !!ventaExitosa || showCobroModal
+      showCierrePosPin || showCierrePos || !!ventaExitosa || showCobroModal || showNotaCreditoModal
     if (anyModalOpen) return
 
     const isInInput =
@@ -703,6 +709,19 @@ export function PosTerminal() {
                   <Wallet size={12} />Caja<CaretDown size={10} />
                 </button>
               )}
+              {/* Botón Facturas de caja (Slice 2, rename de "Nota de Credito")
+                  — mobile only, siempre visible con sesion (independiente de
+                  permisos de caja — el PIN A vive dentro del propio modal,
+                  Spec notas-credito-pos) */}
+              {sesion && (
+                <button
+                  type="button"
+                  onClick={() => setShowNotaCreditoModal(true)}
+                  className="sm:hidden shrink-0 inline-flex items-center gap-1 px-2 py-1 text-xs rounded-md border text-muted-foreground bg-muted/40 hover:bg-muted transition-colors"
+                >
+                  <FileX size={12} />Fact.
+                </button>
+              )}
             </div>
             {/* Divider — desktop only */}
             <div className="hidden sm:block h-4 w-px bg-border shrink-0" />
@@ -777,7 +796,7 @@ export function PosTerminal() {
           </div>
 
           {/* Row 3: Caja operation buttons — desktop only (mobile usa el botón en Row 1) */}
-          {sesion && (canMovManualPos || canCloseCajaPos) && (
+          {sesion && (
             <>
               {/* Desktop: botones individuales */}
               <div className="hidden sm:flex px-4 py-2 items-center gap-1.5 flex-wrap justify-center">
@@ -811,6 +830,14 @@ export function PosTerminal() {
                     <XCircle size={12} />Cerrar Caja
                   </button>
                 )}
+                {/* Facturas de caja (Slice 2, rename de "Nota de Credito") —
+                    visible siempre que haya sesion, independiente de
+                    canMovManualPos/canCloseCajaPos: el PIN A
+                    por-falta-de-permiso vive dentro del propio modal. */}
+                <button type="button" onClick={() => setShowNotaCreditoModal(true)}
+                  className="inline-flex items-center gap-1 px-2.5 py-1 text-xs rounded border text-muted-foreground hover:text-red-700 hover:bg-red-50 hover:border-red-200 transition-colors">
+                  <FileX size={12} />Facturas de caja
+                </button>
               </div>
             </>
           )}
@@ -1388,6 +1415,14 @@ export function PosTerminal() {
         isOpen={showCierrePos}
         onClose={() => setShowCierrePos(false)}
         sesionId={sesion?.id}
+      />
+
+      {/* Nota de Credito POS-express (Slice 5a-2a) — auto-contenido, no
+          comparte estado con el carrito/CobroModal */}
+      <NotaCreditoPosModal
+        isOpen={showNotaCreditoModal}
+        onClose={() => setShowNotaCreditoModal(false)}
+        sesion={sesion}
       />
     </>
   )
