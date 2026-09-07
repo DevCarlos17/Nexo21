@@ -2,6 +2,7 @@ import { useEffect } from 'react'
 import { Outlet, createRootRoute } from '@tanstack/react-router'
 import { toast, Toaster } from 'sonner'
 import { PWAInstallBanner } from '@/components/pwa/pwa-install-banner'
+import { PWAUpdateBanner } from '@/components/pwa/pwa-update-banner'
 import { connector } from '@/core/db/powersync/connector'
 import type { UploadFailedInfo } from '@/core/db/powersync/connector'
 
@@ -96,6 +97,7 @@ function RootComponent() {
     <>
       <Outlet />
       <Toaster position="top-right" richColors duration={1500} />
+      <PWAUpdateBanner />
       <PWAInstallBanner />
     </>
   )

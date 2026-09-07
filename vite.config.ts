@@ -24,7 +24,7 @@ export default defineConfig({
     viteReact(),
     tailwindcss(),
     VitePWA({
-      registerType: 'autoUpdate',
+      registerType: 'prompt',
       manifest: {
         name: 'ClaraPOS',
         short_name: 'ClaraPOS',
