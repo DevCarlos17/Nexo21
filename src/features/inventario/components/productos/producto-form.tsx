@@ -1024,10 +1024,6 @@ export function ProductoForm({ isOpen, onClose, producto }: ProductoFormProps) {
   const esServicioOComboLocal = tipo === 'S' || tipo === 'C'
   const esComboLocal = tipo === 'C'
 
-  function handleBackdropClick(e: React.MouseEvent<HTMLDialogElement>) {
-    if (e.target === dialogRef.current) onClose()
-  }
-
   // IVA config
   const selectedImpuesto = impuestosIva.find((i) => i.id === impuestoIvaId)
   const alicuota =
@@ -1087,7 +1083,6 @@ export function ProductoForm({ isOpen, onClose, producto }: ProductoFormProps) {
     <dialog
       ref={dialogRef}
       onClose={onClose}
-      onClick={handleBackdropClick}
       className="backdrop:bg-black/50 rounded-xl p-0 w-[calc(100vw-2rem)] max-w-2xl shadow-2xl overflow-hidden"
     >
       <form onSubmit={handleSubmit} className="flex flex-col max-h-[90vh]">
