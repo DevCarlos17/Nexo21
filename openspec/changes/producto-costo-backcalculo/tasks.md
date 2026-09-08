@@ -39,30 +39,30 @@ If actual diff exceeds 400 lines while applying, split at the commit boundary ab
 
 ## Phase 3: Form — State & Refs
 
-- [ ] 3.1 In `producto-form.tsx` (~L358, near `proyeccion*` state), add `ultimaFuenteMayorRef`/`ultimaFuenteEspecialRef` (`useRef<FuentePrecio>`), `costoBackCalculado` state, `avisoMargenNegativo` state (`'detal'|'mayor'|'especial'|null`).
-- [ ] 3.2 In the reset `useEffect` (~L413-490), set both refs to `'margen'` in the create branch and `null` in the edit branch.
-- [ ] 3.3 Set `.current = 'margen'` in `handleMargenMayorChange`/`handleMargenEspecialChange`; `.current = 'precio'` in `handlePrecioMayorUsdChange/BsChange`, `handlePrecioEspecialUsdChange/BsChange`, `handlePrecioFinalMayorUsdChange/BsChange`, `handlePrecioFinalEspecialUsdChange/BsChange` (~L695-861).
+- [x] 3.1 In `producto-form.tsx` (~L358, near `proyeccion*` state), add `ultimaFuenteMayorRef`/`ultimaFuenteEspecialRef` (`useRef<FuentePrecio>`), `costoBackCalculado` state, `avisoMargenNegativo` state (`'detal'|'mayor'|'especial'|null`).
+- [x] 3.2 In the reset `useEffect` (~L413-490), set both refs to `'margen'` in the create branch and `null` in the edit branch.
+- [x] 3.3 Set `.current = 'margen'` in `handleMargenMayorChange`/`handleMargenEspecialChange`; `.current = 'precio'` in `handlePrecioMayorUsdChange/BsChange`, `handlePrecioEspecialUsdChange/BsChange`, `handlePrecioFinalMayorUsdChange/BsChange`, `handlePrecioFinalEspecialUsdChange/BsChange` (~L695-861).
 
 ## Phase 4: Form — Negative Margin Clamp
 
-- [ ] 4.1 In `handleMargenChange`/`handleMargenMayorChange`/`handleMargenEspecialChange` (~L682-718), clamp `parseFloat(val) < 0` to `'0'` for state + downstream math, set `avisoMargenNegativo` to that level. Verify: existing PVP math for `margen >= 0` unchanged (regression via 7.1).
+- [x] 4.1 In `handleMargenChange`/`handleMargenMayorChange`/`handleMargenEspecialChange` (~L682-718), clamp `parseFloat(val) < 0` to `'0'` for state + downstream math, set `avisoMargenNegativo` to that level. Verify: existing PVP math for `margen >= 0` unchanged (regression via 7.1).
 
 ## Phase 5: Form — Blur Orchestrator & Wiring
 
-- [ ] 5.1 Add `ejecutarBackCalcSiAplica(pvpOverrideUsd?: number)`: calls `debeBackCalcularCosto`, short-circuits if false; else calls `backcalcularCostoYCascada`, writes `costoUsd`/`costoBs` (tasa guard), cascades `mayor`/`especial` (skip if ref !== `'margen'`), sets `costoBackCalculado(true)`, clears touched `proyeccion*`.
-- [ ] 5.2 Add `onBlur={() => ejecutarBackCalcSiAplica()}` on margen Detal, PVP Detal USD, PVP Detal Bs inputs (~L1584-1621).
-- [ ] 5.3 Append `ejecutarBackCalcSiAplica(baseUsd)` at the end of `handlePrecioFinalDetalUsdChange`/`handlePrecioFinalDetalBsChange` (~L777-803).
-- [ ] 5.4 Clear `costoBackCalculado(false)` in `handleCostoUsdChange`/`handleCostoBsChange` (~L635-650).
+- [x] 5.1 Add `ejecutarBackCalcSiAplica(pvpOverrideUsd?: number)`: calls `debeBackCalcularCosto`, short-circuits if false; else calls `backcalcularCostoYCascada`, writes `costoUsd`/`costoBs` (tasa guard), cascades `mayor`/`especial` (skip if ref !== `'margen'`), sets `costoBackCalculado(true)`, clears touched `proyeccion*`.
+- [x] 5.2 Add `onBlur={() => ejecutarBackCalcSiAplica()}` on margen Detal, PVP Detal USD, PVP Detal Bs inputs (~L1584-1621).
+- [x] 5.3 Append `ejecutarBackCalcSiAplica(baseUsd)` at the end of `handlePrecioFinalDetalUsdChange`/`handlePrecioFinalDetalBsChange` (~L777-803).
+- [x] 5.4 Clear `costoBackCalculado(false)` in `handleCostoUsdChange`/`handleCostoBsChange` (~L635-650).
 
 ## Phase 6: Form — Inline Notices
 
-- [ ] 6.1 Add inline "costo recalculado por el sistema" text near Costo USD input (~L1516-1521), gated on `costoBackCalculado`, styled like the existing `esComboLocal` hint.
-- [ ] 6.2 Add inline "margen ajustado a 0%" text under each margen cell (detal/mayor/especial), gated on `avisoMargenNegativo === nivel`.
+- [x] 6.1 Add inline "costo recalculado por el sistema" text near Costo USD input (~L1516-1521), gated on `costoBackCalculado`, styled like the existing `esComboLocal` hint.
+- [x] 6.2 Add inline "margen ajustado a 0%" text under each margen cell (detal/mayor/especial), gated on `avisoMargenNegativo === nivel`.
 
-**Commit 2**: `producto-form.tsx` only (~115 lines).
+**Commit 2**: `producto-form.tsx` only (~115 lines). Actual: +123/-9 (net +114).
 
 ## Phase 7: Verification
 
-- [ ] 7.1 Run `yarn test:run` — full suite green; confirm combo/servicio (`esComboLocal`) and existing `calcularPrecioPreservandoMargen`/`calcularViolacionCostoPvp` tests unaffected.
-- [ ] 7.2 Run `yarn type-check` + `yarn type-check:test` — no new errors.
-- [ ] 7.3 Manual smoke: canonical example (proposal.md) end-to-end in the form; edit-mode default (`null` fuente) does not overwrite loaded prices on stray blur.
+- [x] 7.1 Run `yarn test:run` — full suite green; confirm combo/servicio (`esComboLocal`) and existing `calcularPrecioPreservandoMargen`/`calcularViolacionCostoPvp` tests unaffected. (93 files / 1148 tests, unchanged from baseline.)
+- [x] 7.2 Run `yarn type-check` + `yarn type-check:test` — no new errors. (Pre-existing noise only, verified via git stash against clean tree.)
+- [ ] 7.3 Manual smoke: canonical example (proposal.md) end-to-end in the form; edit-mode default (`null` fuente) does not overwrite loaded prices on stray blur. **Not performed this session — no dev server available. Pending for sdd-verify or manual QA.**

@@ -22,6 +22,10 @@ import { localNow } from '@/lib/dates'
 import {
   calcularPrecioPreservandoMargen,
   calcularViolacionCostoPvp,
+  debeBackCalcularCosto,
+  backcalcularCostoYCascada,
+  calcularCostoBsBackCalculado,
+  type FuentePrecio,
 } from '@/features/inventario/lib/producto-precio-gating'
 import { useCatalogoGlobal } from '@/features/inventario/hooks/use-catalogo-global'
 import { upsertStockDeposito } from '@/features/inventario/lib/stock-deposito'
@@ -366,6 +370,14 @@ export function ProductoForm({ isOpen, onClose, producto }: ProductoFormProps) {
   const [proyeccionMayor, setProyeccionMayor] = useState<ProyeccionPvp | null>(null)
   const [proyeccionEspecial, setProyeccionEspecial] = useState<ProyeccionPvp | null>(null)
 
+  // Fuente del ultimo valor tipeado en mayor/especial, leida solo al blur por
+  // el back-calculo de costo (ver producto-precio-gating.ts). useRef: no debe
+  // disparar re-render en cada tecla (openspec/changes/producto-costo-backcalculo/design.md).
+  const ultimaFuenteMayorRef = useRef<FuentePrecio>(null)
+  const ultimaFuenteEspecialRef = useRef<FuentePrecio>(null)
+  const [costoBackCalculado, setCostoBackCalculado] = useState(false)
+  const [avisoMargenNegativo, setAvisoMargenNegativo] = useState<'detal' | 'mayor' | 'especial' | null>(null)
+
   // === Duracion por defecto (solo Servicios) ===
   const [duracionMin, setDuracionMin] = useState<number | null>(null)
 
@@ -431,6 +443,10 @@ export function ProductoForm({ isOpen, onClose, producto }: ProductoFormProps) {
         setManejaLotes(producto.maneja_lotes === 1)
         setDepositoId(producto.deposito_id ?? '')
         setStockInicial('')
+        // Edicion: null = "aun no se toco ningun campo de ese nivel esta sesion",
+        // se trata igual que 'precio' (preserva precios ya cargados de la DB).
+        ultimaFuenteMayorRef.current = null
+        ultimaFuenteEspecialRef.current = null
         if (tasaValor > 0) {
           const costoN = parseFloat(producto.costo_usd) || 0
           const ventaN = parseFloat(producto.precio_venta_usd) || 0
@@ -483,11 +499,17 @@ export function ProductoForm({ isOpen, onClose, producto }: ProductoFormProps) {
         setManejaLotes(false)
         setDepositoId('')
         setStockInicial('')
+        // Alta: precios vacios, margenes pre-cargados desde niveles_precio ->
+        // nada tipeado a mano que proteger, la cascada es segura por defecto.
+        ultimaFuenteMayorRef.current = 'margen'
+        ultimaFuenteEspecialRef.current = 'margen'
       }
       setErrors({})
       setProyeccionDetal(null)
       setProyeccionMayor(null)
       setProyeccionEspecial(null)
+      setCostoBackCalculado(false)
+      setAvisoMargenNegativo(null)
       setPopoverOpen(false)
       dialogRef.current?.showModal()
     } else {
@@ -633,6 +655,7 @@ export function ProductoForm({ isOpen, onClose, producto }: ProductoFormProps) {
   }
 
   function handleCostoUsdChange(val: string) {
+    setCostoBackCalculado(false)
     setCostoUsd(val)
     const num = parseFloat(val)
     if (!isNaN(num) && tasaValor > 0) setCostoBs(usdToBs(num, tasaValor).toFixed(2))
@@ -640,6 +663,7 @@ export function ProductoForm({ isOpen, onClose, producto }: ProductoFormProps) {
   }
 
   function handleCostoBsChange(val: string) {
+    setCostoBackCalculado(false)
     setCostoBs(val)
     const num = parseFloat(val)
     if (!isNaN(num) && tasaValor > 0) {
@@ -681,11 +705,16 @@ export function ProductoForm({ isOpen, onClose, producto }: ProductoFormProps) {
   // --- Margen Detal ---
   function handleMargenChange(val: string) {
     setProyeccionDetal(null)
-    setMargen(val)
     const margenN = parseFloat(val)
+    const esNegativo = !isNaN(margenN) && margenN < 0
+    const margenEfectivo = esNegativo ? '0' : val
+    const margenEfectivoN = esNegativo ? 0 : margenN
+    setMargen(margenEfectivo)
+    if (esNegativo) setAvisoMargenNegativo('detal')
+    else if (avisoMargenNegativo === 'detal') setAvisoMargenNegativo(null)
     const costoN = esComboLocal ? 0 : (parseFloat(costoUsd) || 0)
-    if (!isNaN(margenN) && costoN > 0) {
-      const pvp = Math.max(0, costoN * (1 + margenN / 100))
+    if (!isNaN(margenEfectivoN) && costoN > 0) {
+      const pvp = Math.max(0, costoN * (1 + margenEfectivoN / 100))
       setPrecioVentaUsd(pvp.toFixed(2))
       if (tasaValor > 0) setPrecioVentaBs(usdToBs(pvp, tasaValor).toFixed(2))
     }
@@ -694,11 +723,17 @@ export function ProductoForm({ isOpen, onClose, producto }: ProductoFormProps) {
   // --- Margen Mayor ---
   function handleMargenMayorChange(val: string) {
     setProyeccionMayor(null)
-    setMargenMayor(val)
+    ultimaFuenteMayorRef.current = 'margen'
     const margenN = parseFloat(val)
+    const esNegativo = !isNaN(margenN) && margenN < 0
+    const margenEfectivo = esNegativo ? '0' : val
+    const margenEfectivoN = esNegativo ? 0 : margenN
+    setMargenMayor(margenEfectivo)
+    if (esNegativo) setAvisoMargenNegativo('mayor')
+    else if (avisoMargenNegativo === 'mayor') setAvisoMargenNegativo(null)
     const costoN = esComboLocal ? 0 : (parseFloat(costoUsd) || 0)
-    if (!isNaN(margenN) && costoN > 0) {
-      const pvp = Math.max(0, costoN * (1 + margenN / 100))
+    if (!isNaN(margenEfectivoN) && costoN > 0) {
+      const pvp = Math.max(0, costoN * (1 + margenEfectivoN / 100))
       setPrecioMayorUsd(pvp.toFixed(2))
       if (tasaValor > 0) setPrecioMayorBs(usdToBs(pvp, tasaValor).toFixed(2))
     }
@@ -707,19 +742,77 @@ export function ProductoForm({ isOpen, onClose, producto }: ProductoFormProps) {
   // --- Margen Especial ---
   function handleMargenEspecialChange(val: string) {
     setProyeccionEspecial(null)
-    setMargenEspecial(val)
+    ultimaFuenteEspecialRef.current = 'margen'
     const margenN = parseFloat(val)
+    const esNegativo = !isNaN(margenN) && margenN < 0
+    const margenEfectivo = esNegativo ? '0' : val
+    const margenEfectivoN = esNegativo ? 0 : margenN
+    setMargenEspecial(margenEfectivo)
+    if (esNegativo) setAvisoMargenNegativo('especial')
+    else if (avisoMargenNegativo === 'especial') setAvisoMargenNegativo(null)
     const costoN = esComboLocal ? 0 : (parseFloat(costoUsd) || 0)
-    if (!isNaN(margenN) && costoN > 0) {
-      const pvp = Math.max(0, costoN * (1 + margenN / 100))
+    if (!isNaN(margenEfectivoN) && costoN > 0) {
+      const pvp = Math.max(0, costoN * (1 + margenEfectivoN / 100))
       setPrecioEspecialUsd(pvp.toFixed(2))
       if (tasaValor > 0) setPrecioEspecialBs(usdToBs(pvp, tasaValor).toFixed(2))
+    }
+  }
+
+  /**
+   * Orquestador del back-calculo de costo (blur-only, ver
+   * `producto-precio-gating.ts`). Lee margen/PVP/costo DETAL vigentes,
+   * delega la decision de disparo a `debeBackCalcularCosto` y, si aplica,
+   * escribe costo (USD/Bs) y cascada mayor/especial segun la ultima fuente
+   * tocada en esta sesion. No llama a `applyPricesFromCosto` — son flujos
+   * mutuamente excluyentes por construccion (ver design.md).
+   */
+  function ejecutarBackCalcSiAplica(pvpOverrideUsd?: number) {
+    const pvpDetalUsd = pvpOverrideUsd ?? (parseFloat(precioVentaUsd) || 0)
+
+    if (
+      !debeBackCalcularCosto({
+        costoUsd,
+        esCombo: esComboLocal,
+        margenDetalPct: margen,
+        pvpDetalUsd,
+      })
+    ) {
+      return
+    }
+
+    const resultado = backcalcularCostoYCascada({
+      pvpDetalUsd: new Decimal(pvpDetalUsd),
+      margenDetalPct: new Decimal(margen),
+      margenMayorPct: new Decimal(margenMayor.trim() === '' ? '0' : margenMayor),
+      margenEspecialPct: new Decimal(margenEspecial.trim() === '' ? '0' : margenEspecial),
+      ultimaFuenteMayor: ultimaFuenteMayorRef.current,
+      ultimaFuenteEspecial: ultimaFuenteEspecialRef.current,
+    })
+
+    setCostoUsd(resultado.costoUsd.toFixed(2))
+    const costoBsCalculado = calcularCostoBsBackCalculado(resultado.costoUsd, new Decimal(tasaValor))
+    if (costoBsCalculado) setCostoBs(costoBsCalculado.toFixed(2))
+    setCostoBackCalculado(true)
+
+    if (resultado.mayorUsd !== null) {
+      const mayorUsdStr = resultado.mayorUsd.toFixed(2)
+      setPrecioMayorUsd(mayorUsdStr)
+      if (tasaValor > 0) setPrecioMayorBs(usdToBs(parseFloat(mayorUsdStr), tasaValor).toFixed(2))
+      setProyeccionMayor(null)
+    }
+
+    if (resultado.especialUsd !== null) {
+      const especialUsdStr = resultado.especialUsd.toFixed(2)
+      setPrecioEspecialUsd(especialUsdStr)
+      if (tasaValor > 0) setPrecioEspecialBs(usdToBs(parseFloat(especialUsdStr), tasaValor).toFixed(2))
+      setProyeccionEspecial(null)
     }
   }
 
   // --- Bidireccionales: PVP Mayor ---
   function handlePrecioMayorUsdChange(val: string) {
     setProyeccionMayor(null)
+    ultimaFuenteMayorRef.current = 'precio'
     setPrecioMayorUsd(val)
     const num = parseFloat(val)
     if (!isNaN(num) && tasaValor > 0) setPrecioMayorBs(usdToBs(num, tasaValor).toFixed(2))
@@ -732,6 +825,7 @@ export function ProductoForm({ isOpen, onClose, producto }: ProductoFormProps) {
 
   function handlePrecioMayorBsChange(val: string) {
     setProyeccionMayor(null)
+    ultimaFuenteMayorRef.current = 'precio'
     setPrecioMayorBs(val)
     const num = parseFloat(val)
     if (!isNaN(num) && tasaValor > 0) {
@@ -748,6 +842,7 @@ export function ProductoForm({ isOpen, onClose, producto }: ProductoFormProps) {
   // --- Bidireccionales: PVP Especial ---
   function handlePrecioEspecialUsdChange(val: string) {
     setProyeccionEspecial(null)
+    ultimaFuenteEspecialRef.current = 'precio'
     setPrecioEspecialUsd(val)
     const num = parseFloat(val)
     if (!isNaN(num) && tasaValor > 0) setPrecioEspecialBs(usdToBs(num, tasaValor).toFixed(2))
@@ -760,6 +855,7 @@ export function ProductoForm({ isOpen, onClose, producto }: ProductoFormProps) {
 
   function handlePrecioEspecialBsChange(val: string) {
     setProyeccionEspecial(null)
+    ultimaFuenteEspecialRef.current = 'precio'
     setPrecioEspecialBs(val)
     const num = parseFloat(val)
     if (!isNaN(num) && tasaValor > 0) {
@@ -785,6 +881,7 @@ export function ProductoForm({ isOpen, onClose, producto }: ProductoFormProps) {
     const costoN = esComboLocal ? 0 : (parseFloat(costoUsd) || 0)
     if (costoN > 0 && baseUsd > 0)
       setMargen(((baseUsd - costoN) / costoN * 100).toFixed(2))
+    ejecutarBackCalcSiAplica(baseUsd)
   }
 
   function handlePrecioFinalDetalBsChange(val: string) {
@@ -800,6 +897,7 @@ export function ProductoForm({ isOpen, onClose, producto }: ProductoFormProps) {
     const costoN = esComboLocal ? 0 : (parseFloat(costoUsd) || 0)
     if (costoN > 0 && baseUsd > 0)
       setMargen(((baseUsd - costoN) / costoN * 100).toFixed(2))
+    ejecutarBackCalcSiAplica(baseUsd)
   }
 
   // --- Precio Final Mayor → back-calcula base imponible ---
@@ -807,6 +905,7 @@ export function ProductoForm({ isOpen, onClose, producto }: ProductoFormProps) {
     const pfN = parseFloat(val)
     if (isNaN(pfN) || pfN <= 0) return
     setProyeccionMayor(null)
+    ultimaFuenteMayorRef.current = 'precio'
     const factor = alicuota > 0 ? (1 + alicuota / 100) : 1
     const baseUsd = pfN / factor
     setPrecioMayorUsd(baseUsd.toFixed(2))
@@ -821,6 +920,7 @@ export function ProductoForm({ isOpen, onClose, producto }: ProductoFormProps) {
     const pfBsN = parseFloat(val)
     if (isNaN(pfBsN) || pfBsN <= 0) return
     setProyeccionMayor(null)
+    ultimaFuenteMayorRef.current = 'precio'
     const pfUsd = bsToUsd(pfBsN, tasaValor).toNumber()
     const factor = alicuota > 0 ? (1 + alicuota / 100) : 1
     const baseUsd = pfUsd / factor
@@ -836,6 +936,7 @@ export function ProductoForm({ isOpen, onClose, producto }: ProductoFormProps) {
     const pfN = parseFloat(val)
     if (isNaN(pfN) || pfN <= 0) return
     setProyeccionEspecial(null)
+    ultimaFuenteEspecialRef.current = 'precio'
     const factor = alicuota > 0 ? (1 + alicuota / 100) : 1
     const baseUsd = pfN / factor
     setPrecioEspecialUsd(baseUsd.toFixed(2))
@@ -850,6 +951,7 @@ export function ProductoForm({ isOpen, onClose, producto }: ProductoFormProps) {
     const pfBsN = parseFloat(val)
     if (isNaN(pfBsN) || pfBsN <= 0) return
     setProyeccionEspecial(null)
+    ultimaFuenteEspecialRef.current = 'precio'
     const pfUsd = bsToUsd(pfBsN, tasaValor).toNumber()
     const factor = alicuota > 0 ? (1 + alicuota / 100) : 1
     const baseUsd = pfUsd / factor
@@ -1524,6 +1626,9 @@ export function ProductoForm({ isOpen, onClose, producto }: ProductoFormProps) {
                     {esComboLocal && (
                       <p className="text-green-600 text-xs mt-0.5">Se calcula desde ingredientes</p>
                     )}
+                    {costoBackCalculado && !esComboLocal && (
+                      <p className="text-blue-600 text-xs mt-0.5">Costo recalculado por el sistema</p>
+                    )}
                   </div>
                   <div>
                     <label htmlFor="prod-costo-bs" className="block text-xs font-medium text-gray-600 mb-1">
@@ -1592,10 +1697,14 @@ export function ProductoForm({ isOpen, onClose, producto }: ProductoFormProps) {
                               step="any"
                               value={margen}
                               onChange={(e) => handleMargenChange(e.target.value)}
+                              onBlur={() => ejecutarBackCalcSiAplica()}
                               onWheel={stopScroll}
                               placeholder="0"
                               className={`w-full rounded border border-gray-300 bg-white px-2 py-1.5 text-xs focus:outline-none focus:ring-1 focus:ring-blue-500 ${noSpinner}`}
                             />
+                            {avisoMargenNegativo === 'detal' && (
+                              <p className="text-amber-600 text-[11px] mt-0.5">Margen ajustado a 0%</p>
+                            )}
                           </td>
                           <td className="px-2 py-1.5">
                             <input
@@ -1606,6 +1715,7 @@ export function ProductoForm({ isOpen, onClose, producto }: ProductoFormProps) {
                               min="0"
                               value={precioVentaUsd}
                               onChange={(e) => handlePrecioVentaUsdChange(e.target.value)}
+                              onBlur={() => ejecutarBackCalcSiAplica()}
                               onWheel={stopScroll}
                               placeholder="0.00"
                               className={`w-full rounded border px-2 py-1.5 text-xs focus:outline-none focus:ring-1 focus:ring-blue-500 bg-white ${noSpinner} ${
@@ -1625,6 +1735,7 @@ export function ProductoForm({ isOpen, onClose, producto }: ProductoFormProps) {
                               min="0"
                               value={precioVentaBs}
                               onChange={(e) => handlePrecioVentaBsChange(e.target.value)}
+                              onBlur={() => ejecutarBackCalcSiAplica()}
                               onWheel={stopScroll}
                               disabled={tasaValor <= 0}
                               placeholder="0,00"
@@ -1697,6 +1808,9 @@ export function ProductoForm({ isOpen, onClose, producto }: ProductoFormProps) {
                               placeholder="0"
                               className={`w-full rounded border border-gray-300 bg-white px-2 py-1.5 text-xs focus:outline-none focus:ring-1 focus:ring-blue-500 ${noSpinner}`}
                             />
+                            {avisoMargenNegativo === 'mayor' && (
+                              <p className="text-amber-600 text-[11px] mt-0.5">Margen ajustado a 0%</p>
+                            )}
                           </td>
                           <td className="px-2 py-1.5">
                             <input
@@ -1799,6 +1913,9 @@ export function ProductoForm({ isOpen, onClose, producto }: ProductoFormProps) {
                               placeholder="0"
                               className={`w-full rounded border border-gray-300 bg-white px-2 py-1.5 text-xs focus:outline-none focus:ring-1 focus:ring-blue-500 ${noSpinner}`}
                             />
+                            {avisoMargenNegativo === 'especial' && (
+                              <p className="text-amber-600 text-[11px] mt-0.5">Margen ajustado a 0%</p>
+                            )}
                           </td>
                           <td className="px-2 py-1.5">
                             <input
