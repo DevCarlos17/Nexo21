@@ -25,6 +25,13 @@ import {
 } from '@/features/inventario/lib/producto-precio-gating'
 import { useCatalogoGlobal } from '@/features/inventario/hooks/use-catalogo-global'
 import { upsertStockDeposito } from '@/features/inventario/lib/stock-deposito'
+import {
+  saveDraft,
+  loadDraft,
+  clearDraft,
+  isDraftMeaningful,
+  type ProductoFormDraft,
+} from '@/features/inventario/lib/producto-form-draft'
 import { useDebounce } from '@/hooks/use-debounce'
 import { Popover, PopoverAnchor, PopoverContent, PopoverTrigger } from '@/components/ui/popover'
 import { Command, CommandGroup, CommandItem, CommandList } from '@/components/ui/command'
@@ -453,36 +460,71 @@ export function ProductoForm({ isOpen, onClose, producto }: ProductoFormProps) {
           setMargenEspecial('')
         }
       } else {
-        setCodigo('')
-        setTipo('P')
-        setNombre('')
-        setDepartamentoId('')
-        setUnidadBaseId('')
-        setPresentacion('')
-        setStockMinimo('')
-        setCodigoBarras('')
-        setIsActive(true)
-        setDuracionMin(null)
-        setCostoUsd('')
-        setCostoBs('')
-        setPrecioVentaUsd('')
-        setPrecioVentaBs('')
-        setPrecioMayorUsd('')
-        setPrecioMayorBs('')
-        setPrecioEspecialUsd('')
-        setPrecioEspecialBs('')
-        const pct1 = nivel1 ? parseFloat(nivel1.porcentaje_defecto) : 0
-        const pct2 = nivel2 ? parseFloat(nivel2.porcentaje_defecto) : 0
-        const pct3 = nivel3 ? parseFloat(nivel3.porcentaje_defecto) : 0
-        setMargen(pct1 > 0 ? pct1.toFixed(1) : '')
-        setMargenMayor(pct2 > 0 ? pct2.toFixed(1) : '')
-        setMargenEspecial(pct3 > 0 ? pct3.toFixed(1) : '')
-        setTipoImpuesto('Exento')
-        setImpuestoIvaId('')
-        setUbicacion('')
-        setManejaLotes(false)
-        setDepositoId('')
-        setStockInicial('')
+        // Modo alta: intentar restaurar un borrador previo (solo si tiene
+        // contenido util). Los valores en Bs y las proyecciones no se guardan;
+        // se recalculan solos a partir de los USD y la tasa vigente.
+        const draft = loadDraft(localStorage, empresaId)
+        if (draft) {
+          setCodigo(draft.codigo)
+          setTipo(draft.tipo)
+          setNombre(draft.nombre)
+          setDepartamentoId(draft.departamentoId)
+          setUnidadBaseId(draft.unidadBaseId)
+          setPresentacion(draft.presentacion)
+          setStockMinimo(draft.stockMinimo)
+          setCodigoBarras(draft.codigoBarras)
+          setIsActive(draft.isActive)
+          setDuracionMin(draft.duracionMin)
+          setCostoUsd(draft.costoUsd)
+          setCostoBs('')
+          setPrecioVentaUsd(draft.precioVentaUsd)
+          setPrecioVentaBs('')
+          setPrecioMayorUsd(draft.precioMayorUsd)
+          setPrecioMayorBs('')
+          setPrecioEspecialUsd(draft.precioEspecialUsd)
+          setPrecioEspecialBs('')
+          setMargen(draft.margen)
+          setMargenMayor(draft.margenMayor)
+          setMargenEspecial(draft.margenEspecial)
+          setTipoImpuesto(draft.tipoImpuesto)
+          setImpuestoIvaId(draft.impuestoIvaId)
+          setUbicacion(draft.ubicacion)
+          setManejaLotes(draft.manejaLotes)
+          setDepositoId(draft.depositoId)
+          setStockInicial(draft.stockInicial)
+          setActiveTab(draft.activeTab as TabId)
+        } else {
+          setCodigo('')
+          setTipo('P')
+          setNombre('')
+          setDepartamentoId('')
+          setUnidadBaseId('')
+          setPresentacion('')
+          setStockMinimo('')
+          setCodigoBarras('')
+          setIsActive(true)
+          setDuracionMin(null)
+          setCostoUsd('')
+          setCostoBs('')
+          setPrecioVentaUsd('')
+          setPrecioVentaBs('')
+          setPrecioMayorUsd('')
+          setPrecioMayorBs('')
+          setPrecioEspecialUsd('')
+          setPrecioEspecialBs('')
+          const pct1 = nivel1 ? parseFloat(nivel1.porcentaje_defecto) : 0
+          const pct2 = nivel2 ? parseFloat(nivel2.porcentaje_defecto) : 0
+          const pct3 = nivel3 ? parseFloat(nivel3.porcentaje_defecto) : 0
+          setMargen(pct1 > 0 ? pct1.toFixed(1) : '')
+          setMargenMayor(pct2 > 0 ? pct2.toFixed(1) : '')
+          setMargenEspecial(pct3 > 0 ? pct3.toFixed(1) : '')
+          setTipoImpuesto('Exento')
+          setImpuestoIvaId('')
+          setUbicacion('')
+          setManejaLotes(false)
+          setDepositoId('')
+          setStockInicial('')
+        }
       }
       setErrors({})
       setProyeccionDetal(null)
@@ -1011,6 +1053,8 @@ export function ProductoForm({ isOpen, onClose, producto }: ProductoFormProps) {
           })
         }
         toast.success('Producto creado correctamente')
+        // Producto creado con exito: descartar el borrador persistido.
+        clearDraft(localStorage, empresaId)
       }
       onClose()
     } catch (error) {
@@ -1023,6 +1067,93 @@ export function ProductoForm({ isOpen, onClose, producto }: ProductoFormProps) {
 
   const esServicioOComboLocal = tipo === 'S' || tipo === 'C'
   const esComboLocal = tipo === 'C'
+
+  // Arma el borrador a partir del estado actual (solo inputs primarios).
+  const buildDraft = useCallback((): ProductoFormDraft => ({
+    codigo,
+    tipo,
+    nombre,
+    departamentoId,
+    unidadBaseId,
+    presentacion,
+    stockMinimo,
+    codigoBarras,
+    isActive,
+    duracionMin,
+    costoUsd,
+    precioVentaUsd,
+    precioMayorUsd,
+    precioEspecialUsd,
+    margen,
+    margenMayor,
+    margenEspecial,
+    tipoImpuesto,
+    impuestoIvaId,
+    ubicacion,
+    manejaLotes,
+    depositoId,
+    stockInicial,
+    activeTab,
+  }), [
+    codigo, tipo, nombre, departamentoId, unidadBaseId, presentacion,
+    stockMinimo, codigoBarras, isActive, duracionMin, costoUsd, precioVentaUsd,
+    precioMayorUsd, precioEspecialUsd, margen, margenMayor, margenEspecial,
+    tipoImpuesto, impuestoIvaId, ubicacion, manejaLotes, depositoId,
+    stockInicial, activeTab,
+  ])
+
+  // El boton "Limpiar" solo aparece en modo alta y cuando hay contenido util
+  // que descartar, para no mostrar una accion destructiva sobre un form vacio.
+  const mostrarLimpiar = !isEditing && isDraftMeaningful(buildDraft())
+
+  // Cierre unificado (X / Cancelar / Escape). En modo alta persiste el borrador
+  // para poder retomar la carga; en modo edicion no guarda nada.
+  const handleClose = useCallback(() => {
+    if (!isEditing) {
+      saveDraft(localStorage, empresaId, buildDraft())
+    }
+    onClose()
+  }, [isEditing, empresaId, buildDraft, onClose])
+
+  // Boton "Limpiar" (solo modo alta): vacia el formulario y descarta el borrador.
+  const handleLimpiar = useCallback(() => {
+    clearDraft(localStorage, empresaId)
+    setCodigo('')
+    setTipo('P')
+    setNombre('')
+    setDepartamentoId('')
+    setUnidadBaseId('')
+    setPresentacion('')
+    setStockMinimo('')
+    setCodigoBarras('')
+    setIsActive(true)
+    setDuracionMin(null)
+    setCostoUsd('')
+    setCostoBs('')
+    setPrecioVentaUsd('')
+    setPrecioVentaBs('')
+    setPrecioMayorUsd('')
+    setPrecioMayorBs('')
+    setPrecioEspecialUsd('')
+    setPrecioEspecialBs('')
+    const pct1 = nivel1 ? parseFloat(nivel1.porcentaje_defecto) : 0
+    const pct2 = nivel2 ? parseFloat(nivel2.porcentaje_defecto) : 0
+    const pct3 = nivel3 ? parseFloat(nivel3.porcentaje_defecto) : 0
+    setMargen(pct1 > 0 ? pct1.toFixed(1) : '')
+    setMargenMayor(pct2 > 0 ? pct2.toFixed(1) : '')
+    setMargenEspecial(pct3 > 0 ? pct3.toFixed(1) : '')
+    setTipoImpuesto('Exento')
+    setImpuestoIvaId('')
+    setUbicacion('')
+    setManejaLotes(false)
+    setDepositoId('')
+    setStockInicial('')
+    setProyeccionDetal(null)
+    setProyeccionMayor(null)
+    setProyeccionEspecial(null)
+    setErrors({})
+    setActiveTab('general')
+  }, [empresaId, nivel1, nivel2, nivel3])
 
   // IVA config
   const selectedImpuesto = impuestosIva.find((i) => i.id === impuestoIvaId)
@@ -1083,6 +1214,12 @@ export function ProductoForm({ isOpen, onClose, producto }: ProductoFormProps) {
     <dialog
       ref={dialogRef}
       onClose={onClose}
+      onCancel={(e) => {
+        // Escape: interceptar el cierre nativo para poder persistir el borrador
+        // (en modo alta) antes de cerrar, via handleClose.
+        e.preventDefault()
+        handleClose()
+      }}
       className="backdrop:bg-black/50 rounded-xl p-0 w-[calc(100vw-2rem)] max-w-2xl shadow-2xl overflow-hidden"
     >
       <form onSubmit={handleSubmit} className="flex flex-col max-h-[90vh]">
@@ -1097,7 +1234,7 @@ export function ProductoForm({ isOpen, onClose, producto }: ProductoFormProps) {
             </h2>
             <button
               type="button"
-              onClick={onClose}
+              onClick={handleClose}
               className="text-gray-400 hover:text-gray-600 transition-colors p-1 rounded"
             >
               <svg className="w-5 h-5" fill="none" viewBox="0 0 24 24" stroke="currentColor">
@@ -2061,15 +2198,30 @@ export function ProductoForm({ isOpen, onClose, producto }: ProductoFormProps) {
             STICKY FOOTER — Acciones
         ============================================================ */}
         <div className="flex-none bg-white border-t border-gray-200 px-6 py-4 flex items-center justify-between gap-3">
-          <p className="text-xs text-gray-400">
-            {!esComboLocal && parseNumOrZero(costoUsd) === 0 && (
-              <span className="text-amber-600">Ingresa el costo para habilitar el guardado</span>
+          <div className="flex items-center gap-3 min-w-0">
+            {mostrarLimpiar && (
+              <button
+                type="button"
+                onClick={handleLimpiar}
+                disabled={submitting}
+                className="inline-flex items-center gap-1.5 px-3 py-2 text-sm font-medium text-red-600 border border-red-200 rounded-md hover:bg-red-50 hover:border-red-300 transition-colors disabled:opacity-50"
+              >
+                <svg className="w-4 h-4" fill="none" viewBox="0 0 24 24" stroke="currentColor">
+                  <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M19 7l-.867 12.142A2 2 0 0116.138 21H7.862a2 2 0 01-1.995-1.858L5 7m5 4v6m4-6v6m1-10V4a1 1 0 00-1-1h-4a1 1 0 00-1 1v3M4 7h16" />
+                </svg>
+                Limpiar
+              </button>
             )}
-          </p>
+            <p className="text-xs text-gray-400 truncate">
+              {!esComboLocal && parseNumOrZero(costoUsd) === 0 && (
+                <span className="text-amber-600">Ingresa el costo para habilitar el guardado</span>
+              )}
+            </p>
+          </div>
           <div className="flex gap-3">
             <button
               type="button"
-              onClick={onClose}
+              onClick={handleClose}
               disabled={submitting}
               className="px-4 py-2 text-sm font-medium text-gray-700 bg-gray-100 rounded-md hover:bg-gray-200 transition-colors disabled:opacity-50"
             >
